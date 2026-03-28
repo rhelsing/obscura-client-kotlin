@@ -28,7 +28,7 @@ class LWWMap(
 
     suspend fun set(entry: OrmEntry): OrmEntry {
         ensureLoaded()
-        // C4 fix: clamp future timestamps to prevent spoofing
+        // Prevent a malicious peer from setting a far-future timestamp that permanently wins LWW conflicts
         val maxAllowed = System.currentTimeMillis() + 60_000 // 60s clock skew tolerance
         val clamped = if (entry.timestamp > maxAllowed) entry.copy(timestamp = maxAllowed) else entry
         val existing = entries[clamped.id]

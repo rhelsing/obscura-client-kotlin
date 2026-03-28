@@ -25,7 +25,7 @@ class ModelStore(internal val db: ObscuraDatabase) {
     fun getAll(modelName: String): List<OrmEntry> {
         val now = System.currentTimeMillis()
         return db.modelEntryQueries.selectByModel(modelName).executeAsList()
-            .filter { row -> row.ttl_expires_at == null || row.ttl_expires_at > now } // H5 fix: filter expired
+            .filter { row -> row.ttl_expires_at == null || row.ttl_expires_at > now } // Exclude expired entries so TTL-limited models (e.g. stories) disappear on time
             .map { row ->
                 OrmEntry(
                     id = row.entry_id,
@@ -40,7 +40,7 @@ class ModelStore(internal val db: ObscuraDatabase) {
     fun find(modelName: String, id: String): OrmEntry? {
         val row = db.modelEntryQueries.selectByModelAndId(modelName, id).executeAsOneOrNull()
             ?: return null
-        // H5 fix: check TTL on single reads too
+        // Single-entry reads must also respect TTL, not just list queries
         if (row.ttl_expires_at != null && row.ttl_expires_at <= System.currentTimeMillis()) return null
         return OrmEntry(
             id = row.entry_id,

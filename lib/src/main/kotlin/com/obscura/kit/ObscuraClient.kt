@@ -3,6 +3,7 @@ package com.obscura.kit
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import com.obscura.kit.crypto.ParsedSyncBlob
 import com.obscura.kit.crypto.SignalStore
+import com.obscura.kit.crypto.toBase64
 import com.obscura.kit.db.ObscuraDatabase
 import com.obscura.kit.network.APIClient
 import com.obscura.kit.network.GatewayConnection
@@ -173,7 +174,7 @@ class ObscuraClient(
     private fun startDatabaseObservation() {
         // Friends: accepted
         scope.launch {
-            db.friendQueries.selectByStatus("accepted")
+            db.friendQueries.selectByStatus(FriendStatus.ACCEPTED.value)
                 .asFlow()
                 .mapToList(Dispatchers.IO)
                 .map { rows -> rows.map { it.toFriendData() } }
@@ -182,7 +183,7 @@ class ObscuraClient(
 
         // Friends: pending
         scope.launch {
-            db.friendQueries.selectByStatus("pending_received")
+            db.friendQueries.selectByStatus(FriendStatus.PENDING_RECEIVED.value)
                 .asFlow()
                 .mapToList(Dispatchers.IO)
                 .map { rows -> rows.map { it.toFriendData() } }
@@ -225,16 +226,16 @@ class ObscuraClient(
         val regResult = api.registerUser(username, password)
         api.token = regResult.getString("token")
 
-        val identityKeyB64 = Base64.getEncoder().encodeToString(identityKeyPair.publicKey.serialize())
+        val identityKeyB64 = identityKeyPair.publicKey.serialize().toBase64()
         val spkJson = JSONObject().apply {
             put("keyId", signedPreKey.id)
-            put("publicKey", Base64.getEncoder().encodeToString(signedPreKey.keyPair.publicKey.serialize()))
-            put("signature", Base64.getEncoder().encodeToString(signedPreKey.signature))
+            put("publicKey", signedPreKey.keyPair.publicKey.serialize().toBase64())
+            put("signature", signedPreKey.signature.toBase64())
         }
         val otpJsonArr = JSONArray(oneTimePreKeys.map { pk ->
             JSONObject().apply {
                 put("keyId", pk.id)
-                put("publicKey", Base64.getEncoder().encodeToString(pk.keyPair.publicKey.serialize()))
+                put("publicKey", pk.keyPair.publicKey.serialize().toBase64())
             }
         })
 
@@ -252,14 +253,21 @@ class ObscuraClient(
         userId = api.getUserId(deviceToken)
         deviceId = provResult.optString("deviceId", null) ?: api.getDeviceId(deviceToken)
 
-        messenger.mapDevice(deviceId!!, userId!!, regId)
+        messenger.mapDevice(
+            requireNotNull(deviceId) { "deviceId not set - register failed to provision device" },
+            requireNotNull(userId) { "userId not set - register failed to resolve user" },
+            regId
+        )
 
         devices.storeIdentity(DeviceIdentityData(
-            deviceId = deviceId!!, userId = userId!!, username = username, token = deviceToken
+            deviceId = requireNotNull(deviceId) { "deviceId not set - register failed to provision device" },
+            userId = requireNotNull(userId) { "userId not set - register failed to resolve user" },
+            username = username,
+            token = deviceToken
         ))
 
         _authState.value = AuthState.AUTHENTICATED
-        delay(500)
+        delay(config.authRateLimitDelayMs)
     }
 
     suspend fun login(username: String, password: String) {
@@ -276,11 +284,15 @@ class ObscuraClient(
             devices.storeIdentity(identity.copy(token = token))
         }
         if (deviceId != null && userId != null) {
-            messenger.mapDevice(deviceId!!, userId!!, registrationId)
+            messenger.mapDevice(
+                requireNotNull(deviceId) { "deviceId not set - call register/login first" },
+                requireNotNull(userId) { "userId not set - call register/login first" },
+                registrationId
+            )
         }
 
         _authState.value = AuthState.AUTHENTICATED
-        delay(500)
+        delay(config.authRateLimitDelayMs)
     }
 
     /**
@@ -302,16 +314,16 @@ class ObscuraClient(
         val signedPreKey = generateSignedPreKey(identityKeyPair, 1)
         val oneTimePreKeys = generateOneTimePreKeys(1, 100)
 
-        val identityKeyB64 = Base64.getEncoder().encodeToString(identityKeyPair.publicKey.serialize())
+        val identityKeyB64 = identityKeyPair.publicKey.serialize().toBase64()
         val spkJson = JSONObject().apply {
             put("keyId", signedPreKey.id)
-            put("publicKey", Base64.getEncoder().encodeToString(signedPreKey.keyPair.publicKey.serialize()))
-            put("signature", Base64.getEncoder().encodeToString(signedPreKey.signature))
+            put("publicKey", signedPreKey.keyPair.publicKey.serialize().toBase64())
+            put("signature", signedPreKey.signature.toBase64())
         }
         val otpJsonArr = JSONArray(oneTimePreKeys.map { pk ->
             JSONObject().apply {
                 put("keyId", pk.id)
-                put("publicKey", Base64.getEncoder().encodeToString(pk.keyPair.publicKey.serialize()))
+                put("publicKey", pk.keyPair.publicKey.serialize().toBase64())
             }
         })
 
@@ -328,14 +340,21 @@ class ObscuraClient(
         refreshToken = provResult.optString("refreshToken", null)
         deviceId = provResult.optString("deviceId", null) ?: api.getDeviceId(deviceToken)
 
-        messenger.mapDevice(deviceId!!, userId!!, regId)
+        messenger.mapDevice(
+            requireNotNull(deviceId) { "deviceId not set - loginAndProvision failed to provision device" },
+            requireNotNull(userId) { "userId not set - loginAndProvision failed to resolve user" },
+            regId
+        )
 
         devices.storeIdentity(DeviceIdentityData(
-            deviceId = deviceId!!, userId = userId!!, username = username, token = deviceToken
+            deviceId = requireNotNull(deviceId) { "deviceId not set - loginAndProvision failed to provision device" },
+            userId = requireNotNull(userId) { "userId not set - loginAndProvision failed to resolve user" },
+            username = username,
+            token = deviceToken
         ))
 
         _authState.value = AuthState.AUTHENTICATED
-        delay(500)
+        delay(config.authRateLimitDelayMs)
     }
 
     /**
@@ -381,7 +400,7 @@ class ObscuraClient(
         refreshToken = null
         _authState.value = AuthState.LOGGED_OUT
         _connectionState.value = ConnectionState.DISCONNECTED
-        // H1 fix: wipe all databases on logout
+        // Clear all local data so a subsequent login starts fresh and doesn't leak state across accounts
         db.friendQueries.deleteAll()
         db.messageQueries.deleteAll()
         db.deviceQueries.deleteAllDevices()
@@ -415,7 +434,7 @@ class ObscuraClient(
     // Token Refresh — dedup, 80% TTL schedule, failure tracking
     // ================================================================
 
-    private var refreshInProgress: Deferred<Boolean>? = null
+    private val refreshInProgress = java.util.concurrent.atomic.AtomicReference<Deferred<Boolean>?>(null)
     private var consecutiveRefreshFailures = 0
     private val MAX_REFRESH_FAILURES = 5
 
@@ -435,7 +454,7 @@ class ObscuraClient(
      */
     private suspend fun refreshTokens(): Boolean {
         // Dedup: if refresh is already in-flight, piggyback on it
-        refreshInProgress?.let { return it.await() }
+        refreshInProgress.get()?.let { return it.await() }
 
         val deferred = scope.async {
             try {
@@ -456,11 +475,11 @@ class ObscuraClient(
             }
         }
 
-        refreshInProgress = deferred
+        refreshInProgress.set(deferred)
         try {
             return deferred.await()
         } finally {
-            refreshInProgress = null
+            refreshInProgress.set(null)
         }
     }
 
@@ -525,22 +544,20 @@ class ObscuraClient(
             val highestId = signalStore.getHighestPreKeyId().toInt()
             val newPreKeys = generateOneTimePreKeys(highestId + 1, PREKEY_REPLENISH_COUNT)
 
-            val identityKeyB64 = Base64.getEncoder().encodeToString(
-                signalStore.getIdentityKeyPair().publicKey.serialize()
-            )
+            val identityKeyB64 = signalStore.getIdentityKeyPair().publicKey.serialize().toBase64()
 
             // Get current signed prekey for upload
             val spkRecord = signalStore.loadSignedPreKey(1)
             val spkJson = JSONObject().apply {
                 put("keyId", spkRecord.id)
-                put("publicKey", Base64.getEncoder().encodeToString(spkRecord.keyPair.publicKey.serialize()))
-                put("signature", Base64.getEncoder().encodeToString(spkRecord.signature))
+                put("publicKey", spkRecord.keyPair.publicKey.serialize().toBase64())
+                put("signature", spkRecord.signature.toBase64())
             }
 
             val otpJsonArr = JSONArray(newPreKeys.map { pk ->
                 JSONObject().apply {
                     put("keyId", pk.id)
-                    put("publicKey", Base64.getEncoder().encodeToString(pk.keyPair.publicKey.serialize()))
+                    put("publicKey", pk.keyPair.publicKey.serialize().toBase64())
                 }
             })
 
@@ -643,7 +660,7 @@ class ObscuraClient(
             }
             ClientMessage.Type.DEVICE_ANNOUNCE -> {
                 val announce = msg.deviceAnnounce
-                // C1 fix: verify signature before trusting device list
+                // Device announcements must be signed by the recovery key to prevent forged device lists
                 if (announce.signature.size() > 0 && announce.recoveryPublicKey.size() > 0) {
                     val payload = com.obscura.kit.crypto.RecoveryKeys.serializeAnnounceForSigning(
                         announce.devicesList.map { it.deviceId }, announce.timestamp, announce.isRevocation
@@ -672,7 +689,7 @@ class ObscuraClient(
                 ), sourceUserId)
             }
             ClientMessage.Type.SYNC_BLOB -> {
-                if (sourceUserId != userId) return // C2 fix: only own devices can sync
+                if (sourceUserId != userId) return // Ignore sync blobs from other users — only our own devices should send these
                 processSyncBlob(msg)
             }
             ClientMessage.Type.SENT_SYNC -> {
@@ -689,13 +706,13 @@ class ObscuraClient(
                 signalStore.deleteAllSessions(sourceUserId)
             }
             ClientMessage.Type.FRIEND_SYNC -> {
-                if (sourceUserId != userId) return // C2 fix: only own devices can sync friends
+                if (sourceUserId != userId) return // A friend sync from someone else's device would corrupt our friend list
                 val fs = msg.friendSync
-                val status = if (fs.status == "accepted") FriendStatus.ACCEPTED else FriendStatus.PENDING_RECEIVED
-                if (fs.action == "add") {
+                val status = if (fs.status == FriendStatus.ACCEPTED.value) FriendStatus.ACCEPTED else FriendStatus.PENDING_RECEIVED
+                if (fs.action == FriendSyncAction.ADD.value) {
                     friends.add(sourceUserId, fs.username, status,
                         fs.devicesList.map { FriendDeviceInfo(it.deviceUuid, it.deviceId, it.deviceName) })
-                } else if (fs.action == "remove") {
+                } else if (fs.action == FriendSyncAction.REMOVE.value) {
                     friends.remove(sourceUserId)
                 }
             }
@@ -770,7 +787,7 @@ class ObscuraClient(
         sendToAllDevices(targetUserId, msg)
         friends.add(targetUserId, targetUsername, FriendStatus.PENDING_SENT)
 
-        syncFriendToOwnDevices(targetUsername, "add", "pending_sent")
+        syncFriendToOwnDevices(targetUsername, FriendSyncAction.ADD.value, FriendStatus.PENDING_SENT.value)
     }
 
     suspend fun acceptFriend(targetUserId: String, targetUsername: String) {
@@ -785,7 +802,7 @@ class ObscuraClient(
         friends.add(targetUserId, targetUsername, FriendStatus.ACCEPTED)
 
         // Sync to own devices
-        syncFriendToOwnDevices(targetUsername, "add", "accepted")
+        syncFriendToOwnDevices(targetUsername, FriendSyncAction.ADD.value, FriendStatus.ACCEPTED.value)
     }
 
     suspend fun sendAttachment(friendUsername: String, attachmentId: String, contentKey: ByteArray, nonce: ByteArray, mimeType: String, sizeBytes: Long) {
@@ -1107,19 +1124,43 @@ class ObscuraClient(
     // Backup (MEDIUM)
     // ================================================================
 
+    /**
+     * Upload encrypted backup. Uses ECDH + AES-256-GCM with recovery public key.
+     * No recovery phrase needed for upload — only the stored public key.
+     */
     suspend fun uploadBackup(): String? {
         val friendList = friends.getAccepted()
         val compressed = com.obscura.kit.crypto.SyncBlob.export(friendList)
-        val newEtag = api.uploadBackup(compressed, backupEtag)
+
+        val pubKey = recoveryPublicKey
+        val payload = if (pubKey != null) {
+            val ecPubKey = Curve.decodePoint(pubKey, 0)
+            com.obscura.kit.crypto.BackupCrypto.encrypt(compressed, ecPubKey)
+        } else {
+            compressed // fallback: unencrypted if no recovery key set
+        }
+
+        val newEtag = api.uploadBackup(payload, backupEtag)
         backupEtag = newEtag
         return newEtag
     }
 
-    suspend fun downloadBackup(): ParsedSyncBlob? {
+    /**
+     * Download and decrypt backup using recovery phrase.
+     * Returns null if no backup exists.
+     */
+    suspend fun downloadBackup(recoveryPhrase: String? = null): ParsedSyncBlob? {
         val result = api.downloadBackup(backupEtag) ?: return null
         val (data, etag) = result
         backupEtag = etag
-        return com.obscura.kit.crypto.SyncBlob.parse(data)
+
+        val decrypted = if (recoveryPhrase != null) {
+            com.obscura.kit.crypto.BackupCrypto.decrypt(data, recoveryPhrase)
+        } else {
+            data // fallback: assume unencrypted
+        }
+
+        return com.obscura.kit.crypto.SyncBlob.parse(decrypted)
     }
 
     suspend fun checkBackup(): Triple<Boolean, String?, Long?> {
@@ -1137,21 +1178,25 @@ class ObscuraClient(
         val signedPreKey = generateSignedPreKey(identityKeyPair, 1)
         val oneTimePreKeys = generateOneTimePreKeys(1, 100)
 
-        val identityKeyB64 = Base64.getEncoder().encodeToString(identityKeyPair.publicKey.serialize())
+        val identityKeyB64 = identityKeyPair.publicKey.serialize().toBase64()
         val spkJson = JSONObject().apply {
             put("keyId", signedPreKey.id)
-            put("publicKey", Base64.getEncoder().encodeToString(signedPreKey.keyPair.publicKey.serialize()))
-            put("signature", Base64.getEncoder().encodeToString(signedPreKey.signature))
+            put("publicKey", signedPreKey.keyPair.publicKey.serialize().toBase64())
+            put("signature", signedPreKey.signature.toBase64())
         }
         val otpJsonArr = JSONArray(oneTimePreKeys.map { pk ->
             JSONObject().apply {
                 put("keyId", pk.id)
-                put("publicKey", Base64.getEncoder().encodeToString(pk.keyPair.publicKey.serialize()))
+                put("publicKey", pk.keyPair.publicKey.serialize().toBase64())
             }
         })
 
         api.uploadDeviceKeys(identityKeyB64, regId, spkJson, otpJsonArr)
-        messenger.mapDevice(deviceId!!, userId!!, regId)
+        messenger.mapDevice(
+            requireNotNull(deviceId) { "deviceId not set - call register/login first" },
+            requireNotNull(userId) { "userId not set - call register/login first" },
+            regId
+        )
     }
 
     // ================================================================
@@ -1173,12 +1218,34 @@ class ObscuraClient(
     // Attachments
     // ================================================================
 
+    /**
+     * Upload raw bytes (no client-side encryption). Use uploadEncryptedAttachment for E2E.
+     */
     suspend fun uploadAttachment(data: ByteArray): Pair<String, Long> {
         val result = api.uploadAttachment(data)
         return Pair(result.getString("id"), result.optLong("expiresAt", 0))
     }
 
+    /**
+     * Upload encrypted attachment and send CONTENT_REFERENCE to a friend in one call.
+     * Encrypts with AES-256-GCM, uploads ciphertext, sends key material via Signal.
+     */
+    suspend fun sendEncryptedAttachment(friendUsername: String, plaintext: ByteArray, mimeType: String = "application/octet-stream") {
+        val encrypted = com.obscura.kit.crypto.AttachmentCrypto.encrypt(plaintext)
+        val result = api.uploadAttachment(encrypted.ciphertext)
+        val attachmentId = result.getString("id")
+        sendAttachment(friendUsername, attachmentId, encrypted.contentKey, encrypted.nonce, mimeType, encrypted.sizeBytes)
+    }
+
     suspend fun downloadAttachment(id: String): ByteArray = api.fetchAttachment(id)
+
+    /**
+     * Download and decrypt an attachment using the key material from CONTENT_REFERENCE.
+     */
+    suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray, expectedHash: ByteArray? = null): ByteArray {
+        val ciphertext = api.fetchAttachment(id)
+        return com.obscura.kit.crypto.AttachmentCrypto.decrypt(ciphertext, contentKey, nonce, expectedHash)
+    }
 
     // ================================================================
     // Raw + Wait (escape hatches)

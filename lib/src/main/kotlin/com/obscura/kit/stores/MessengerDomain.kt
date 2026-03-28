@@ -2,6 +2,8 @@ package com.obscura.kit.stores
 
 import com.google.protobuf.ByteString
 import com.obscura.kit.crypto.SignalStore
+import com.obscura.kit.crypto.UuidCodec
+import com.obscura.kit.crypto.fromBase64
 import com.obscura.kit.network.APIClient
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -14,7 +16,6 @@ import org.signal.libsignal.protocol.message.PreKeySignalMessage
 import org.signal.libsignal.protocol.message.SignalMessage
 import org.signal.libsignal.protocol.state.PreKeyBundle
 import xyz.obscura.server.contracts.ObscuraProtocol.*
-import java.nio.ByteBuffer
 import java.util.*
 
 data class DecryptedMessage(
@@ -67,8 +68,8 @@ class MessengerDomain internal constructor(
                 .build()
 
             val submission = SendMessageRequest.Submission.newBuilder()
-                .setSubmissionId(uuidToBytes(UUID.randomUUID()))
-                .setDeviceId(uuidToBytes(UUID.fromString(targetDeviceId)))
+                .setSubmissionId(UuidCodec.uuidToBytes(UUID.randomUUID()))
+                .setDeviceId(UuidCodec.uuidToBytes(UUID.fromString(targetDeviceId)))
                 .setMessage(ByteString.copyFrom(encMsg.toByteArray()))
                 .build()
 
@@ -106,31 +107,11 @@ class MessengerDomain internal constructor(
 
     suspend fun fetchPreKeyBundles(userId: String): List<PreKeyBundle> = withContext(dispatcher) {
         val bundlesJson = api.fetchPreKeyBundles(userId)
-        (0 until bundlesJson.length()).map { i ->
-            val b = bundlesJson.getJSONObject(i)
-            val deviceId = b.getString("deviceId")
-            val regId = b.getInt("registrationId")
-
-            deviceMap[deviceId] = Pair(userId, regId)
-
-            val spk = b.getJSONObject("signedPreKey")
-            val otp = if (b.has("oneTimePreKey") && !b.isNull("oneTimePreKey")) b.getJSONObject("oneTimePreKey") else null
-
-            PreKeyBundle(
-                regId,
-                1,
-                otp?.getInt("keyId") ?: 0,
-                otp?.let { Curve.decodePoint(Base64.getDecoder().decode(it.getString("publicKey")), 0) },
-                spk.getInt("keyId"),
-                Curve.decodePoint(Base64.getDecoder().decode(spk.getString("publicKey")), 0),
-                Base64.getDecoder().decode(spk.getString("signature")),
-                IdentityKey(Base64.getDecoder().decode(b.getString("identityKey")))
-            )
-        }
+        parsePreKeyBundles(bundlesJson, userId)
     }
 
     suspend fun decrypt(envelope: Envelope): DecryptedMessage = withContext(dispatcher) {
-        val senderId = bytesToUuid(envelope.senderId.toByteArray()).toString()
+        val senderId = UuidCodec.bytesToUuid(envelope.senderId.toByteArray()).toString()
         val encMsg = EncryptedMessage.parseFrom(envelope.message.toByteArray())
 
         val isPreKey = encMsg.type == EncryptedMessage.Type.TYPE_PREKEY_MESSAGE
@@ -184,7 +165,8 @@ class MessengerDomain internal constructor(
     private suspend fun ensureSession(targetUserId: String, registrationId: Int) {
         val address = SignalProtocolAddress(targetUserId, registrationId)
         if (!signalStore.containsSession(address)) {
-            val bundles = fetchPreKeyBundlesInternal(targetUserId)
+            val bundlesJson = api.fetchPreKeyBundles(targetUserId)
+            val bundles = parsePreKeyBundles(bundlesJson, targetUserId)
             val bundle = bundles.find { it.registrationId == registrationId } ?: bundles.firstOrNull()
                 ?: throw IllegalStateException("No prekey bundles available for $targetUserId")
             val builder = SessionBuilder(signalStore, address)
@@ -199,9 +181,7 @@ class MessengerDomain internal constructor(
         return Pair(ciphertext.type, ciphertext.serialize())
     }
 
-    // Internal version that doesn't go through the confined dispatcher (called from within withContext already)
-    private suspend fun fetchPreKeyBundlesInternal(userId: String): List<PreKeyBundle> {
-        val bundlesJson = api.fetchPreKeyBundles(userId)
+    private fun parsePreKeyBundles(bundlesJson: JSONArray, userId: String): List<PreKeyBundle> {
         return (0 until bundlesJson.length()).map { i ->
             val b = bundlesJson.getJSONObject(i)
             val deviceId = b.getString("deviceId")
@@ -214,25 +194,13 @@ class MessengerDomain internal constructor(
             PreKeyBundle(
                 regId, 1,
                 otp?.getInt("keyId") ?: 0,
-                otp?.let { Curve.decodePoint(Base64.getDecoder().decode(it.getString("publicKey")), 0) },
+                otp?.let { Curve.decodePoint(it.getString("publicKey").fromBase64(), 0) },
                 spk.getInt("keyId"),
-                Curve.decodePoint(Base64.getDecoder().decode(spk.getString("publicKey")), 0),
-                Base64.getDecoder().decode(spk.getString("signature")),
-                IdentityKey(Base64.getDecoder().decode(b.getString("identityKey")))
+                Curve.decodePoint(spk.getString("publicKey").fromBase64(), 0),
+                spk.getString("signature").fromBase64(),
+                IdentityKey(b.getString("identityKey").fromBase64())
             )
         }
     }
 
-    private fun uuidToBytes(uuid: UUID): ByteString {
-        val bb = ByteBuffer.allocate(16)
-        bb.putLong(uuid.mostSignificantBits)
-        bb.putLong(uuid.leastSignificantBits)
-        return ByteString.copyFrom(bb.array())
-    }
-
-    private fun bytesToUuid(bytes: ByteArray): UUID {
-        if (bytes.size < 16) return UUID(0, 0) // bounds check: malformed UUID → zero UUID
-        val bb = ByteBuffer.wrap(bytes)
-        return UUID(bb.getLong(), bb.getLong())
-    }
 }

@@ -1,8 +1,11 @@
 package com.obscura.app
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -10,9 +13,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import com.obscura.kit.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -91,8 +98,8 @@ fun RegisterScreen(client: ObscuraClient, app: ObscuraApp? = null, onStatus: (St
                     try {
                         onStatus("Registering '$username'...")
                         withContext(Dispatchers.IO) { client.register(username, password) }
-                        app?.saveSession()
-                        onStatus("Registered as ${client.username}")
+                    } catch (e: CancellationException) {
+                        // Expected — composable left composition after auth state changed
                     } catch (e: Exception) {
                         onStatus("Error: ${e::class.simpleName}: ${e.message ?: e.cause?.message ?: e.toString()}")
                     }
@@ -104,8 +111,8 @@ fun RegisterScreen(client: ObscuraClient, app: ObscuraApp? = null, onStatus: (St
                     try {
                         onStatus("Logging in...")
                         withContext(Dispatchers.IO) { client.login(username, password) }
-                        app?.saveSession()
-                        onStatus("Logged in as ${client.username}")
+                    } catch (e: CancellationException) {
+                        // Expected — composable left composition after auth state changed
                     } catch (e: Exception) {
                         onStatus("Error: ${e::class.simpleName}: ${e.message ?: e.cause?.message ?: e.toString()}")
                     }
@@ -131,10 +138,12 @@ fun ConnectedScreen(
     val conversations by client.conversations.collectAsState()
     val events = remember { mutableStateListOf<String>() }
 
-    // Connect WebSocket when this screen appears
+    // Connect WebSocket when this screen appears (skip if already connected)
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            try { client.connect() } catch (_: Exception) {}
+        if (client.connectionState.value != ConnectionState.CONNECTED) {
+            withContext(Dispatchers.IO) {
+                try { client.connect() } catch (_: Exception) {}
+            }
         }
     }
 
@@ -142,7 +151,7 @@ fun ConnectedScreen(
     LaunchedEffect(Unit) {
         client.events.collect { msg ->
             events.add(0, "${msg.type}: ${msg.text.take(50).ifEmpty { msg.username }}")
-            if (events.size > 20) events.removeLast()
+            if (events.size > 20) events.removeAt(events.lastIndex)
         }
     }
 
@@ -150,7 +159,21 @@ fun ConnectedScreen(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text("User: ${client.username} (${client.userId?.take(8)}...)", style = MaterialTheme.typography.titleMedium)
+        val clipboardManager = LocalClipboardManager.current
+        val context = LocalContext.current
+        val userId = client.userId ?: ""
+        @OptIn(ExperimentalFoundationApi::class)
+        Text(
+            "User: ${client.username} ($userId)",
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.combinedClickable(
+                onClick = {},
+                onLongClick = {
+                    clipboardManager.setText(AnnotatedString(userId))
+                    Toast.makeText(context, "userId copied", Toast.LENGTH_SHORT).show()
+                }
+            )
+        )
 
         // Befriend
         Row(
@@ -169,6 +192,7 @@ fun ConnectedScreen(
                 scope.launch {
                     try {
                         withContext(Dispatchers.IO) { client.befriend(targetUserId, targetUsername.ifEmpty { "friend" }) }
+                        targetUserId = ""
                         onStatus("Friend request sent!")
                     } catch (e: Exception) { onStatus("Error: ${e.message}") }
                 }
@@ -247,7 +271,6 @@ fun ConnectedScreen(
         OutlinedButton(onClick = {
             scope.launch {
                 withContext(Dispatchers.IO) { client.logout() }
-                app?.clearSession()
                 onStatus("Logged out")
             }
         }) { Text("Logout") }

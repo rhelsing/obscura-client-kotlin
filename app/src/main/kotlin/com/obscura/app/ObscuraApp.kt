@@ -5,10 +5,13 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
 import app.cash.sqldelight.driver.android.AndroidSqliteDriver
+import com.obscura.kit.AuthState
 import com.obscura.kit.ObscuraClient
 import com.obscura.kit.ObscuraConfig
 import com.obscura.kit.db.ObscuraDatabase
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collectLatest
 
 /**
  * Application singleton — owns ObscuraClient for the process lifetime.
@@ -36,11 +39,25 @@ class ObscuraApp : Application() {
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
 
-        // Persistent SQLite database for Signal keys, messages, friends
+        // Load SQLCipher native library
+        System.loadLibrary("sqlcipher")
+
+        // Encrypted SQLite database (Signal's pattern: random key sealed by Keystore)
+        val dbSecret = DatabaseSecretProvider.getOrCreate(applicationContext)
+        val factory = SupportOpenHelperFactory(dbSecret, null, false)
         val driver = AndroidSqliteDriver(
             schema = ObscuraDatabase.Schema,
             context = applicationContext,
-            name = "obscura.db"
+            name = "obscura.db",
+            factory = factory,
+            callback = object : AndroidSqliteDriver.Callback(ObscuraDatabase.Schema) {
+                override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                    // Match Signal: KDF iter = 1 since key is already 256-bit random
+                    db.query("PRAGMA cipher_default_kdf_iter = 1;").close()
+                    db.query("PRAGMA cipher_default_page_size = 4096;").close()
+                    super.onOpen(db)
+                }
+            }
         )
 
         client = ObscuraClient(
@@ -64,6 +81,17 @@ class ObscuraApp : Application() {
             // Auto-reconnect WebSocket
             scope.launch {
                 try { client.connect() } catch (_: Exception) {}
+            }
+        }
+
+        // Auto-save session whenever auth state changes
+        scope.launch {
+            client.authState.collectLatest { state ->
+                if (state == AuthState.AUTHENTICATED) {
+                    saveSession()
+                } else {
+                    clearSession()
+                }
             }
         }
     }

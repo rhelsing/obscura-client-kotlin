@@ -13,6 +13,11 @@ enum class FriendStatus(val value: String) {
     ACCEPTED("accepted")
 }
 
+enum class FriendSyncAction(val value: String) {
+    ADD("add"),
+    REMOVE("remove")
+}
+
 data class DeviceTarget(
     val deviceId: String,
     val userId: String,

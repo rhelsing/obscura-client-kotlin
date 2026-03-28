@@ -14,7 +14,7 @@ ObscuraKit has solid foundations: Signal Protocol via libsignal-client, confined
 - Round 1 (11): TLS enforcement, constant-time comparison, UUID message IDs, bounded channels, TLS 1.2+ only, identity change callback, structured logger, debug prints removed, Thread.sleep → delay, SecureRandom singleton, configurable DB path
 - Round 2 (9): Device announce signature verification, friendSync/syncBlob source validation, LWWMap timestamp clamping, logout wipes databases, TOFU fails closed on DB error, revocation cleans Signal state, TTL enforced on ORM reads
 
-**Remaining: 3 unfixed (database encryption, backup encryption, identity key binding — all need design decisions or dependencies)**
+**Remaining: 2 unfixed (certificate pinning, device announce replay protection — need server key hash and design decisions)**
 
 ---
 
@@ -55,35 +55,19 @@ ObscuraKit has solid foundations: Signal Protocol via libsignal-client, confined
 
 ## Remaining Critical Findings
 
-### C3. Database Encryption At Rest — Ready, Needs App-Level Wiring
+### C3. Database Encryption At Rest — FIXED
 
-**Status:** Infrastructure is in place. `ObscuraClient` accepts an external `SqlDriver` parameter. The app module passes an encrypted driver; the library never touches encryption directly.
+**Status:** Implemented in `app/` module following Signal Android's exact pattern.
 
-**Files:** `ObscuraClient.kt` constructor: `ObscuraClient(config, externalDriver)`
+**Implementation:**
+- `DatabaseSecret.kt` — generates 32-byte random key via `SecureRandom`, seals it with Android Keystore (AES-256-GCM), stores sealed blob in SharedPreferences
+- `ObscuraApp.kt` — passes `SupportOpenHelperFactory(dbSecret)` to `AndroidSqliteDriver`
+- SQLCipher PRAGMA: `cipher_default_kdf_iter = 1` (key is already 256-bit random, no password stretching needed)
+- Dependencies: `net.zetetic:sqlcipher-android:4.6.1`, `androidx.sqlite:sqlite:2.4.0`
 
-**How to use (in Android app module):**
-```kotlin
-// app/build.gradle.kts
-dependencies {
-    implementation("net.zetetic:sqlcipher-android:4.6.1")
-    implementation("androidx.sqlite:sqlite:2.4.0")
-}
+**Files:** `app/src/main/kotlin/com/obscura/app/DatabaseSecret.kt`, `ObscuraApp.kt`
 
-// In your Application or DI setup:
-val passphrase = getOrCreatePassphrase() // from Android Keystore
-val factory = SupportSQLiteOpenHelper.Factory(SQLCipherOpenHelperFactory(passphrase))
-val driver = AndroidSqliteDriver(
-    schema = ObscuraDatabase.Schema,
-    context = applicationContext,
-    name = "obscura.db",
-    factory = factory
-)
-val client = ObscuraClient(config, driver)
-```
-
-The library stays pure JVM. Encryption is the app's responsibility. Same pattern as GRDB + SQLCipher on iOS.
-
-**Without SQLCipher:** `ObscuraClient(config)` defaults to in-memory (tests) or plaintext file (via `config.databasePath`). Not suitable for production.
+The library stays pure JVM. Encryption is the app's responsibility. Same pattern as Signal Android's `DatabaseSecretProvider` + `KeyStoreHelper`.
 
 ---
 
@@ -364,9 +348,9 @@ Even with signature verification (C1 fix), old signed announcements can be repla
 - [x] **H4** — Clean Signal state on device revocation (1 line)
 - [x] **H5** — TTL enforced on ORM reads (2 lines)
 
-### Phase 2: Remaining — app-level integration
+### Phase 2: Remaining
 
-- [ ] **C3** — Database encryption — pass SQLCipher-backed `SqlDriver` via `ObscuraClient(config, driver)`. See README for usage.
+- [x] **C3** — Database encryption — SQLCipher with Keystore-wrapped random key (Signal Android pattern)
 - [ ] **M3** — Certificate pinning (need server's public key hash)
 - [ ] **M4** — Store per-friend announce timestamp, reject replays (10 lines)
 

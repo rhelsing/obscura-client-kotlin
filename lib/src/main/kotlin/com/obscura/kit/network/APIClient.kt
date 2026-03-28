@@ -7,6 +7,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.URLEncoder
+import com.obscura.kit.crypto.fromBase64Url
 import java.security.MessageDigest
 import java.util.*
 
@@ -248,7 +249,7 @@ class APIClient(private val baseUrl: String) {
         val tok = t ?: return null
         return try {
             val payload = tok.split(".")[1]
-            val decoded = Base64.getUrlDecoder().decode(payload)
+            val decoded = payload.fromBase64Url()
             JSONObject(String(decoded))
         } catch (e: Exception) {
             null

@@ -65,6 +65,10 @@ dependencies {
     // Secure storage
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
+    // SQLCipher — encrypted SQLite (same as Signal Android)
+    implementation(libs.sqlcipher)
+    implementation(libs.sqlite)
+
     // Desugaring (required by libsignal-android)
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }

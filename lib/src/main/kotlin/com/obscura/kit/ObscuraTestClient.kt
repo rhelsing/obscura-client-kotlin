@@ -2,6 +2,9 @@ package com.obscura.kit
 
 import com.google.protobuf.ByteString
 import com.obscura.kit.crypto.SignalStore
+import com.obscura.kit.crypto.UuidCodec
+import com.obscura.kit.crypto.fromBase64
+import com.obscura.kit.crypto.toBase64
 import com.obscura.kit.network.APIClient
 import com.obscura.kit.network.HttpException
 import kotlinx.coroutines.*
@@ -20,7 +23,6 @@ import org.signal.libsignal.protocol.state.PreKeyBundle
 import org.signal.libsignal.protocol.state.PreKeyRecord
 import org.signal.libsignal.protocol.state.SignedPreKeyRecord
 import xyz.obscura.server.contracts.ObscuraProtocol.*
-import java.nio.ByteBuffer
 import java.util.*
 import java.util.concurrent.TimeUnit
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
@@ -45,6 +47,7 @@ class ObscuraTestClient(private val apiUrl: String) {
         private set
     var username: String? = null
         private set
+    var authRateLimitDelayMs: Long = 500L
     var refreshToken: String? = null
         private set
     var registrationId: Int = 0
@@ -112,16 +115,16 @@ class ObscuraTestClient(private val apiUrl: String) {
         api.token = regResult.getString("token")
 
         // 4. Provision device with Signal keys
-        val identityKeyB64 = Base64.getEncoder().encodeToString(identityKeyPair.publicKey.serialize())
+        val identityKeyB64 = identityKeyPair.publicKey.serialize().toBase64()
         val spkJson = JSONObject().apply {
             put("keyId", signedPreKey.id)
-            put("publicKey", Base64.getEncoder().encodeToString(signedPreKey.keyPair.publicKey.serialize()))
-            put("signature", Base64.getEncoder().encodeToString(signedPreKey.signature))
+            put("publicKey", signedPreKey.keyPair.publicKey.serialize().toBase64())
+            put("signature", signedPreKey.signature.toBase64())
         }
         val otpJsonArr = JSONArray(oneTimePreKeys.map { pk ->
             JSONObject().apply {
                 put("keyId", pk.id)
-                put("publicKey", Base64.getEncoder().encodeToString(pk.keyPair.publicKey.serialize()))
+                put("publicKey", pk.keyPair.publicKey.serialize().toBase64())
             }
         })
 
@@ -140,9 +143,10 @@ class ObscuraTestClient(private val apiUrl: String) {
         deviceId = provResult.optString("deviceId", null) ?: api.getDeviceId(deviceToken)
 
         // Map own device
-        deviceMap[deviceId!!] = Pair(userId!!, regId)
+        deviceMap[requireNotNull(deviceId) { "deviceId not set - register failed to provision device" }] =
+            Pair(requireNotNull(userId) { "userId not set - register failed to resolve user" }, regId)
 
-        Thread.sleep(500) // Rate limit buffer
+        Thread.sleep(authRateLimitDelayMs) // Rate limit buffer
     }
 
     suspend fun login(username: String? = null, password: String, deviceId: String? = null) {
@@ -153,7 +157,7 @@ class ObscuraTestClient(private val apiUrl: String) {
         refreshToken = result.optString("refreshToken", null)
         userId = api.getUserId(result.getString("token"))
         this.deviceId = result.optString("deviceId", null) ?: api.getDeviceId(result.getString("token")) ?: devId
-        Thread.sleep(500)
+        Thread.sleep(authRateLimitDelayMs)
     }
 
     // ================================================================
@@ -214,7 +218,7 @@ class ObscuraTestClient(private val apiUrl: String) {
     }
 
     private fun handleEnvelopeSync(envelope: Envelope) {
-        val senderId = bytesToUuid(envelope.senderId.toByteArray())
+        val senderId = UuidCodec.bytesToUuid(envelope.senderId.toByteArray()).toString()
         val envelopeId = envelope.id
 
         try {
@@ -325,11 +329,11 @@ class ObscuraTestClient(private val apiUrl: String) {
             PreKeyBundle(
                 regId, 1,
                 otp?.getInt("keyId") ?: 0,
-                otp?.let { Curve.decodePoint(Base64.getDecoder().decode(it.getString("publicKey")), 0) },
+                otp?.let { Curve.decodePoint(it.getString("publicKey").fromBase64(), 0) },
                 spk.getInt("keyId"),
-                Curve.decodePoint(Base64.getDecoder().decode(spk.getString("publicKey")), 0),
-                Base64.getDecoder().decode(spk.getString("signature")),
-                IdentityKey(Base64.getDecoder().decode(b.getString("identityKey")))
+                Curve.decodePoint(spk.getString("publicKey").fromBase64(), 0),
+                spk.getString("signature").fromBase64(),
+                IdentityKey(b.getString("identityKey").fromBase64())
             )
         }
     }
@@ -385,8 +389,8 @@ class ObscuraTestClient(private val apiUrl: String) {
             .build()
 
         val submission = SendMessageRequest.Submission.newBuilder()
-            .setSubmissionId(uuidToBytes(UUID.randomUUID()))
-            .setDeviceId(uuidToBytes(UUID.fromString(targetDeviceId)))
+            .setSubmissionId(UuidCodec.uuidToBytes(UUID.randomUUID()))
+            .setDeviceId(UuidCodec.uuidToBytes(UUID.fromString(targetDeviceId)))
             .setMessage(ByteString.copyFrom(encMsg.toByteArray()))
             .build()
 
@@ -494,16 +498,4 @@ class ObscuraTestClient(private val apiUrl: String) {
         }
     }
 
-    private fun uuidToBytes(uuid: UUID): ByteString {
-        val bb = ByteBuffer.allocate(16)
-        bb.putLong(uuid.mostSignificantBits)
-        bb.putLong(uuid.leastSignificantBits)
-        return ByteString.copyFrom(bb.array())
-    }
-
-    private fun bytesToUuid(bytes: ByteArray): String {
-        if (bytes.size < 16) return "00000000-0000-0000-0000-000000000000"
-        val bb = ByteBuffer.wrap(bytes)
-        return UUID(bb.getLong(), bb.getLong()).toString()
-    }
 }

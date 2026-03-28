@@ -24,12 +24,22 @@ class SignalStore(
     /** Callback when a contact's identity key changes (safety number changed). */
     var onIdentityChanged: ((address: String, oldKey: ByteArray?, newKey: ByteArray) -> Unit)? = null
 
+    init {
+        // Restore local identity from SQLite if it exists
+        val saved = db.signalKeyQueries.selectLocalIdentity().executeAsOneOrNull()
+        if (saved != null) {
+            identityKeyPair = IdentityKeyPair(saved.identity_key_pair)
+            localRegistrationId = saved.registration_id.toInt()
+        }
+    }
+
     /**
      * Initialize with an existing identity or generate a new one.
      */
     fun initialize(keyPair: IdentityKeyPair, registrationId: Int) {
         this.identityKeyPair = keyPair
         this.localRegistrationId = registrationId
+        db.signalKeyQueries.insertLocalIdentity(keyPair.serialize(), registrationId.toLong())
     }
 
     /**
@@ -76,7 +86,7 @@ class SignalStore(
                 ?: return true // TOFU — Trust On First Use
             java.security.MessageDigest.isEqual(stored, identityKey.serialize())
         } catch (e: Exception) {
-            false // H2 fix: fail CLOSED on DB errors
+            false // Fail closed: if we can't read the DB, reject the identity rather than silently trusting it
         }
     }
 
