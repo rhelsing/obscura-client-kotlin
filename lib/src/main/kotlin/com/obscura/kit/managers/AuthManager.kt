@@ -3,27 +3,19 @@ package com.obscura.kit.managers
 import com.obscura.kit.AuthState
 import com.obscura.kit.ObscuraConfig
 import com.obscura.kit.ObscuraLogger
-import com.obscura.kit.crypto.SignalStore
 import com.obscura.kit.crypto.toBase64
 import com.obscura.kit.managers.SignalKeyUtils.toApiJson
-import com.obscura.kit.network.APIClient
 import com.obscura.kit.network.GatewayConnection
 import com.obscura.kit.network.ProvisionDeviceRequest
-import com.obscura.kit.stores.DeviceDomain
 import com.obscura.kit.stores.DeviceIdentityData
-import com.obscura.kit.stores.MessengerDomain
 import kotlinx.coroutines.*
 
 /**
  * Handles register, login, loginAndProvision, logout, session restore, and token refresh.
  */
 internal class AuthManager(
+    private val ctx: ClientContext,
     private val config: ObscuraConfig,
-    private val session: ClientSession,
-    private val api: APIClient,
-    private val signalStore: SignalStore,
-    private val messenger: MessengerDomain,
-    private val devices: DeviceDomain,
     private val gateway: GatewayConnection,
     private val scope: CoroutineScope,
     private val setAuthState: (AuthState) -> Unit,
@@ -31,6 +23,11 @@ internal class AuthManager(
     private val loggerProvider: () -> ObscuraLogger,
     private val onLogout: suspend () -> Unit
 ) {
+    private val session get() = ctx.session
+    private val api get() = ctx.api
+    private val signalStore get() = ctx.signalStore
+    private val messenger get() = ctx.messenger
+    private val devices get() = ctx.devices
     private val refreshInProgress = java.util.concurrent.atomic.AtomicReference<Deferred<Boolean>?>(null)
     private var consecutiveRefreshFailures = 0
     private val MAX_REFRESH_FAILURES = 5
@@ -46,7 +43,7 @@ internal class AuthManager(
         val oneTimePreKeys = SignalKeyUtils.generateOneTimePreKeys(signalStore, 1, 100)
 
         val regResult = api.registerUser(username, password)
-        api.token = regResult.getString("token")
+        api.token = regResult.token
 
         val provResult = api.provisionDevice(ProvisionDeviceRequest(
             name = config.deviceName,
@@ -56,11 +53,11 @@ internal class AuthManager(
             oneTimePreKeys = oneTimePreKeys.toApiJson()
         ))
 
-        val deviceToken = provResult.getString("token")
+        val deviceToken = provResult.token
         api.token = deviceToken
-        session.refreshToken = provResult.optString("refreshToken", null)
+        session.refreshToken = provResult.refreshToken
         session.userId = api.getUserId(deviceToken)
-        session.deviceId = provResult.optString("deviceId", null) ?: api.getDeviceId(deviceToken)
+        session.deviceId = provResult.deviceId.ifEmpty { null } ?: api.getDeviceId(deviceToken)
 
         messenger.mapDevice(
             requireNotNull(session.deviceId) { "deviceId not set - register failed to provision device" },
@@ -82,11 +79,11 @@ internal class AuthManager(
     suspend fun login(username: String, password: String) {
         val identity = devices.getIdentity()
         val result = api.loginWithDevice(username, password, identity?.deviceId)
-        val token = result.getString("token")
+        val token = result.token
         api.token = token
-        session.refreshToken = result.optString("refreshToken", null)
+        session.refreshToken = result.refreshToken
         session.userId = api.getUserId(token)
-        session.deviceId = result.optString("deviceId", null) ?: api.getDeviceId(token)
+        session.deviceId = result.deviceId ?: api.getDeviceId(token)
         session.username = username
 
         if (identity != null) {
@@ -108,8 +105,8 @@ internal class AuthManager(
         session.username = username
 
         val loginResult = api.loginWithDevice(username, password, null)
-        api.token = loginResult.getString("token")
-        session.userId = api.getUserId(loginResult.getString("token"))
+        api.token = loginResult.token
+        session.userId = api.getUserId(loginResult.token)
 
         val (identityKeyPair, regId) = signalStore.generateIdentity()
         session.registrationId = regId
@@ -125,10 +122,10 @@ internal class AuthManager(
             oneTimePreKeys = oneTimePreKeys.toApiJson()
         ))
 
-        val deviceToken = provResult.getString("token")
+        val deviceToken = provResult.token
         api.token = deviceToken
-        session.refreshToken = provResult.optString("refreshToken", null)
-        session.deviceId = provResult.optString("deviceId", null) ?: api.getDeviceId(deviceToken)
+        session.refreshToken = provResult.refreshToken
+        session.deviceId = provResult.deviceId.ifEmpty { null } ?: api.getDeviceId(deviceToken)
 
         messenger.mapDevice(
             requireNotNull(session.deviceId) { "deviceId not set - loginAndProvision failed to provision device" },
@@ -200,8 +197,8 @@ internal class AuthManager(
             try {
                 val rt = session.refreshToken ?: return@async false
                 val result = api.refreshSession(rt)
-                api.token = result.getString("token")
-                session.refreshToken = result.optString("refreshToken", null)
+                api.token = result.token
+                session.refreshToken = result.refreshToken
                 consecutiveRefreshFailures = 0
                 true
             } catch (e: Exception) {

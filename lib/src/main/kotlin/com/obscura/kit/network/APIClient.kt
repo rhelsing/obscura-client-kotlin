@@ -25,29 +25,40 @@ class APIClient(private val baseUrl: String) {
 
     var token: String? = null
 
-    // ============================================================
-    // Auth
-    // ============================================================
-
     /**
-     * Register a new user. Returns JSON with token.
+     * Register a new user. Returns typed AuthResponse with token.
      */
-    suspend fun registerUser(username: String, password: String): JSONObject {
-        return postJson("/v1/users", RegisterUserRequest(username, password).toJson(), auth = false)
+    suspend fun registerUser(username: String, password: String): AuthResponse {
+        val json = postJson("/v1/users", RegisterUserRequest(username, password).toJson(), auth = false)
+        return AuthResponse(
+            token = json.getString("token"),
+            refreshToken = json.optStringOrNull("refreshToken"),
+            deviceId = json.optStringOrNull("deviceId")
+        )
     }
 
     /**
-     * Provision a device with Signal keys. Returns device-scoped JWT.
+     * Provision a device with Signal keys. Returns typed ProvisionResponse.
      */
-    suspend fun provisionDevice(request: ProvisionDeviceRequest): JSONObject {
-        return postJson("/v1/devices", request.toJson())
+    suspend fun provisionDevice(request: ProvisionDeviceRequest): ProvisionResponse {
+        val json = postJson("/v1/devices", request.toJson())
+        return ProvisionResponse(
+            token = json.getString("token"),
+            refreshToken = json.optStringOrNull("refreshToken"),
+            deviceId = json.optStringOrNull("deviceId") ?: getDeviceId(json.getString("token")) ?: ""
+        )
     }
 
     /**
      * Login with optional deviceId for device-scoped token.
      */
-    suspend fun loginWithDevice(username: String, password: String, deviceId: String? = null): JSONObject {
-        return postJson("/v1/sessions", LoginRequest(username, password, deviceId).toJson(), auth = false)
+    suspend fun loginWithDevice(username: String, password: String, deviceId: String? = null): AuthResponse {
+        val json = postJson("/v1/sessions", LoginRequest(username, password, deviceId).toJson(), auth = false)
+        return AuthResponse(
+            token = json.getString("token"),
+            refreshToken = json.optStringOrNull("refreshToken"),
+            deviceId = json.optStringOrNull("deviceId")
+        )
     }
 
     /**
@@ -58,15 +69,16 @@ class APIClient(private val baseUrl: String) {
     }
 
     /**
-     * Refresh session token.
+     * Refresh session token. Returns just the new token string.
      */
-    suspend fun refreshSession(refreshToken: String): JSONObject {
-        return postJson("/v1/sessions/refresh", RefreshTokenRequest(refreshToken).toJson(), auth = false)
+    suspend fun refreshSession(refreshToken: String): AuthResponse {
+        val json = postJson("/v1/sessions/refresh", RefreshTokenRequest(refreshToken).toJson(), auth = false)
+        return AuthResponse(
+            token = json.getString("token"),
+            refreshToken = json.optStringOrNull("refreshToken"),
+            deviceId = null
+        )
     }
-
-    // ============================================================
-    // Device Management
-    // ============================================================
 
     suspend fun listDevices(): JSONArray {
         val response = getJson("/v1/devices")
@@ -101,10 +113,6 @@ class APIClient(private val baseUrl: String) {
         return getJsonArray("/v1/users/${enc(userId)}")
     }
 
-    // ============================================================
-    // Messages (protobuf)
-    // ============================================================
-
     /**
      * Send a batch of messages as protobuf binary.
      */
@@ -120,18 +128,18 @@ class APIClient(private val baseUrl: String) {
         return executeBytes(request)
     }
 
-    // ============================================================
-    // Attachments
-    // ============================================================
-
-    suspend fun uploadAttachment(blob: ByteArray): JSONObject {
+    suspend fun uploadAttachment(blob: ByteArray): AttachmentUploadResponse {
         val request = Request.Builder()
             .url("$baseUrl/v1/attachments")
             .post(blob.toRequestBody(OCTET_MEDIA))
             .addHeader("Authorization", "Bearer ${token ?: throw IllegalStateException("No token")}")
             .build()
 
-        return JSONObject(executeString(request))
+        val json = JSONObject(executeString(request))
+        return AttachmentUploadResponse(
+            id = json.getString("id"),
+            expiresAt = json.optLong("expiresAt", 0)
+        )
     }
 
     suspend fun fetchAttachment(id: String): ByteArray {
@@ -143,10 +151,6 @@ class APIClient(private val baseUrl: String) {
 
         return executeBytes(request)
     }
-
-    // ============================================================
-    // Backup
-    // ============================================================
 
     suspend fun uploadBackup(data: ByteArray, etag: String? = null): String? {
         val builder = Request.Builder()
@@ -180,7 +184,7 @@ class APIClient(private val baseUrl: String) {
         return Pair(response.body?.bytes() ?: ByteArray(0), response.header("ETag"))
     }
 
-    suspend fun checkBackup(): Triple<Boolean, String?, Long?> {
+    suspend fun checkBackup(): BackupCheckResponse {
         val request = Request.Builder()
             .url("$baseUrl/v1/backup")
             .head()
@@ -188,14 +192,14 @@ class APIClient(private val baseUrl: String) {
             .build()
 
         val response = httpClient.newCall(request).execute()
-        if (response.code == 404) return Triple(false, null, null)
+        if (response.code == 404) return BackupCheckResponse(exists = false, etag = null, lastModified = null)
         if (!response.isSuccessful) throw HttpException(response.code, "")
-        return Triple(true, response.header("ETag"), response.header("Content-Length")?.toLongOrNull())
+        return BackupCheckResponse(
+            exists = true,
+            etag = response.header("ETag"),
+            lastModified = response.header("Content-Length")?.toLongOrNull()
+        )
     }
-
-    // ============================================================
-    // Gateway
-    // ============================================================
 
     suspend fun fetchGatewayTicket(): String {
         val result = postJson("/v1/gateway/ticket", JSONObject())
@@ -206,10 +210,6 @@ class APIClient(private val baseUrl: String) {
         val wsBase = baseUrl.replace("https://", "wss://").replace("http://", "ws://")
         return "$wsBase/v1/gateway?ticket=${java.net.URLEncoder.encode(ticket, "UTF-8")}"
     }
-
-    // ============================================================
-    // Token Utilities
-    // ============================================================
 
     fun decodeToken(t: String? = token): JSONObject? {
         val tok = t ?: return null
@@ -239,10 +239,6 @@ class APIClient(private val baseUrl: String) {
     private fun JSONObject.optStringOrNull(key: String): String? {
         return if (has(key) && !isNull(key)) getString(key) else null
     }
-
-    // ============================================================
-    // Internal HTTP helpers
-    // ============================================================
 
     private fun postJson(path: String, body: JSONObject, auth: Boolean = true): JSONObject {
         val builder = Request.Builder()

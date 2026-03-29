@@ -1,31 +1,26 @@
 package com.obscura.kit.managers
 
-import com.obscura.kit.crypto.SignalStore
 import com.obscura.kit.crypto.toBase64
 import com.obscura.kit.managers.SignalKeyUtils.toApiJson
-import com.obscura.kit.network.APIClient
 import com.obscura.kit.network.UploadDeviceKeysRequest
-import com.obscura.kit.stores.DeviceDomain
-import com.obscura.kit.stores.FriendDomain
-import com.obscura.kit.stores.MessageDomain
-import com.obscura.kit.stores.MessengerDomain
 import obscura.v2.Client.ClientMessage
 
 /**
  * Device announce, revocation, approve link, takeover.
  */
 internal class DeviceManager(
-    private val session: ClientSession,
-    private val api: APIClient,
-    private val signalStore: SignalStore,
-    private val messenger: MessengerDomain,
-    private val friends: FriendDomain,
-    private val devices: DeviceDomain,
-    private val messages: MessageDomain,
-    private val messageSender: MessageSender,
+    private val ctx: ClientContext,
     private val clientSyncManager: () -> ClientSyncManager,
     private val announceDevicesCallback: suspend () -> Unit
 ) {
+    private val session get() = ctx.session
+    private val api get() = ctx.api
+    private val signalStore get() = ctx.signalStore
+    private val messenger get() = ctx.messenger
+    private val friends get() = ctx.friends
+    private val devices get() = ctx.devices
+    private val messages get() = ctx.messages
+    private val messageSender get() = ctx.messageSender
     suspend fun announceDevices() {
         val ownDevices = devices.getOwnDevices()
         val msg = ClientMessage.newBuilder()

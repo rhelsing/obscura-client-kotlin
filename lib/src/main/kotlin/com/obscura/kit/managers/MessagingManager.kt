@@ -1,9 +1,5 @@
 package com.obscura.kit.managers
 
-import com.obscura.kit.network.APIClient
-import com.obscura.kit.stores.DeviceDomain
-import com.obscura.kit.stores.FriendDomain
-import com.obscura.kit.stores.MessengerDomain
 import obscura.v2.Client.ClientMessage
 import org.json.JSONObject
 
@@ -11,13 +7,14 @@ import org.json.JSONObject
  * Send text, attachments, model sync, raw messages. Upload/download attachments.
  */
 internal class MessagingManager(
-    private val session: ClientSession,
-    private val api: APIClient,
-    private val messenger: MessengerDomain,
-    private val friends: FriendDomain,
-    private val devices: DeviceDomain,
-    private val messageSender: MessageSender
+    private val ctx: ClientContext
 ) {
+    private val session get() = ctx.session
+    private val api get() = ctx.api
+    private val messenger get() = ctx.messenger
+    private val friends get() = ctx.friends
+    private val devices get() = ctx.devices
+    private val messageSender get() = ctx.messageSender
     suspend fun send(friendUsername: String, text: String) {
         val friendData = friends.getAccepted().find { it.username == friendUsername }
             ?: throw IllegalStateException("Not friends with $friendUsername")
@@ -70,8 +67,7 @@ internal class MessagingManager(
     suspend fun sendEncryptedAttachment(friendUsername: String, plaintext: ByteArray, mimeType: String = "application/octet-stream") {
         val encrypted = com.obscura.kit.crypto.AttachmentCrypto.encrypt(plaintext)
         val result = api.uploadAttachment(encrypted.ciphertext)
-        val attachmentId = result.getString("id")
-        sendAttachment(friendUsername, attachmentId, encrypted.contentKey, encrypted.nonce, mimeType, encrypted.sizeBytes)
+        sendAttachment(friendUsername, result.id, encrypted.contentKey, encrypted.nonce, mimeType, encrypted.sizeBytes)
     }
 
     suspend fun sendModelSync(friendUsername: String, model: String, entryId: String, op: String = "CREATE", data: Map<String, Any?>) {
@@ -101,7 +97,7 @@ internal class MessagingManager(
 
     suspend fun uploadAttachment(data: ByteArray): Pair<String, Long> {
         val result = api.uploadAttachment(data)
-        return Pair(result.getString("id"), result.optLong("expiresAt", 0))
+        return Pair(result.id, result.expiresAt)
     }
 
     suspend fun downloadAttachment(id: String): ByteArray = api.fetchAttachment(id)

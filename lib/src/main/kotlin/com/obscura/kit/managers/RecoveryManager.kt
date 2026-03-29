@@ -2,21 +2,19 @@ package com.obscura.kit.managers
 
 import com.obscura.kit.ObscuraConfig
 import com.obscura.kit.crypto.ParsedSyncBlob
-import com.obscura.kit.network.APIClient
-import com.obscura.kit.stores.FriendDomain
-import com.obscura.kit.stores.MessengerDomain
 import org.signal.libsignal.protocol.ecc.Curve
 
 /**
  * Recovery phrase, verify code, backup upload/download, and recovery announcement.
  */
 internal class RecoveryManager(
-    private val config: ObscuraConfig,
-    private val session: ClientSession,
-    private val api: APIClient,
-    private val friends: FriendDomain,
-    private val messageSender: MessageSender
+    private val ctx: ClientContext,
+    private val config: ObscuraConfig
 ) {
+    private val session get() = ctx.session
+    private val api get() = ctx.api
+    private val friends get() = ctx.friends
+    private val messageSender get() = ctx.messageSender
     private var backupEtag: String? = null
 
     fun generateRecoveryPhrase(): String {
@@ -97,6 +95,7 @@ internal class RecoveryManager(
     }
 
     suspend fun checkBackup(): Triple<Boolean, String?, Long?> {
-        return api.checkBackup()
+        val result = api.checkBackup()
+        return Triple(result.exists, result.etag, result.lastModified)
     }
 }

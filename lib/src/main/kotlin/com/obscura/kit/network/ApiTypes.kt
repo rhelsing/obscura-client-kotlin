@@ -3,10 +3,6 @@ package com.obscura.kit.network
 import org.json.JSONArray
 import org.json.JSONObject
 
-// ============================================================
-// Signal Key JSON types (used in provision, takeover, replenish)
-// ============================================================
-
 data class SignedPreKeyJson(val keyId: Int, val publicKey: String, val signature: String) {
     fun toJson() = JSONObject().apply {
         put("keyId", keyId)
@@ -23,10 +19,6 @@ data class OneTimePreKeyJson(val keyId: Int, val publicKey: String) {
 }
 
 fun List<OneTimePreKeyJson>.toJsonArray() = JSONArray(map { it.toJson() })
-
-// ============================================================
-// Auth request types
-// ============================================================
 
 data class RegisterUserRequest(val username: String, val password: String) {
     fun toJson() = JSONObject().apply {
@@ -54,10 +46,6 @@ data class LogoutRequest(val refreshToken: String) {
         put("refreshToken", refreshToken)
     }
 }
-
-// ============================================================
-// Device request types
-// ============================================================
 
 data class ProvisionDeviceRequest(
     val name: String,
@@ -88,3 +76,15 @@ data class UploadDeviceKeysRequest(
         put("oneTimePreKeys", oneTimePreKeys.toJsonArray())
     }
 }
+
+// ============================================================
+// API response types
+// ============================================================
+
+data class AuthResponse(val token: String, val refreshToken: String?, val deviceId: String?)
+
+data class ProvisionResponse(val token: String, val refreshToken: String?, val deviceId: String)
+
+data class AttachmentUploadResponse(val id: String, val expiresAt: Long)
+
+data class BackupCheckResponse(val exists: Boolean, val etag: String?, val lastModified: Long?)

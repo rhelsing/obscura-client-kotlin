@@ -60,10 +60,6 @@ class ObscuraClient(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    // ================================================================
-    // Observable state — what Compose views collect
-    // ================================================================
-
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState
 
@@ -81,10 +77,6 @@ class ObscuraClient(
 
     private val _events = MutableSharedFlow<ReceivedMessage>(extraBufferCapacity = 64)
     val events: SharedFlow<ReceivedMessage> = _events
-
-    // ================================================================
-    // Internal infrastructure
-    // ================================================================
 
     private val driver = externalDriver ?: if (config.databasePath != null) {
         JdbcSqliteDriver("jdbc:sqlite:${config.databasePath}")
@@ -179,14 +171,21 @@ class ObscuraClient(
 
         orm = SchemaDomain(modelStore, syncManager, ttlManager)
 
-        // Create managers — order matters: AuthManager before MessageSender
-        authManager = AuthManager(
-            config = config,
+        // Create ClientContext — shared dependencies for all managers
+        val ctx = ClientContext(
             session = session,
             api = api,
             signalStore = signalStore,
             messenger = messenger,
+            friends = friends,
             devices = devices,
+            messages = messagesDomain
+        )
+
+        // Create managers — order matters: AuthManager before MessageSender
+        authManager = AuthManager(
+            ctx = ctx,
+            config = config,
             gateway = gateway,
             scope = scope,
             setAuthState = { _authState.value = it },
@@ -207,51 +206,18 @@ class ObscuraClient(
         )
 
         messageSender = MessageSender(messenger, authManager)
+        ctx.messageSender = messageSender
 
-        recoveryManager = RecoveryManager(
-            config = config,
-            session = session,
-            api = api,
-            friends = friends,
-            messageSender = messageSender
-        )
+        recoveryManager = RecoveryManager(ctx = ctx, config = config)
 
-        friendshipManager = FriendshipManager(
-            session = session,
-            messenger = messenger,
-            friends = friends,
-            devices = devices,
-            messageSender = messageSender
-        )
+        friendshipManager = FriendshipManager(ctx = ctx)
 
-        messagingManager = MessagingManager(
-            session = session,
-            api = api,
-            messenger = messenger,
-            friends = friends,
-            devices = devices,
-            messageSender = messageSender
-        )
+        messagingManager = MessagingManager(ctx = ctx)
 
-        clientSyncManager = ClientSyncManager(
-            session = session,
-            signalStore = signalStore,
-            messenger = messenger,
-            friends = friends,
-            devices = devices,
-            messages = messagesDomain,
-            messageSender = messageSender
-        )
+        clientSyncManager = ClientSyncManager(ctx = ctx)
 
         deviceManager = DeviceManager(
-            session = session,
-            api = api,
-            signalStore = signalStore,
-            messenger = messenger,
-            friends = friends,
-            devices = devices,
-            messages = messagesDomain,
-            messageSender = messageSender,
+            ctx = ctx,
             clientSyncManager = { clientSyncManager },
             announceDevicesCallback = { announceDevices() }
         )
@@ -297,10 +263,6 @@ class ObscuraClient(
         )
     }
 
-    // ================================================================
-    // Auth — delegates to AuthManager
-    // ================================================================
-
     suspend fun register(username: String, password: String) = authManager.register(username, password)
     suspend fun login(username: String, password: String) = authManager.login(username, password)
     suspend fun loginAndProvision(username: String, password: String, deviceName: String = "Device 2") =
@@ -319,10 +281,6 @@ class ObscuraClient(
     suspend fun logout() = authManager.logout()
     suspend fun ensureFreshToken(): Boolean = authManager.ensureFreshToken()
 
-    // ================================================================
-    // Connection — stays on facade
-    // ================================================================
-
     suspend fun connect() {
         _connectionState.value = ConnectionState.CONNECTING
         gateway.connect()
@@ -338,10 +296,6 @@ class ObscuraClient(
         gateway.disconnect()
         _connectionState.value = ConnectionState.DISCONNECTED
     }
-
-    // ================================================================
-    // Prekey Replenishment — stays on facade
-    // ================================================================
 
     private fun startPreKeyStatusListener() {
         scope.launch {
@@ -380,10 +334,6 @@ class ObscuraClient(
             logger.preKeyReplenishFailed(e.message ?: "unknown")
         }
     }
-
-    // ================================================================
-    // Envelope Processing — stays on facade
-    // ================================================================
 
     private fun startEnvelopeLoop() {
         envelopeJob = scope.launch {
@@ -451,87 +401,96 @@ class ObscuraClient(
 
     private suspend fun routeMessage(msg: ClientMessage, sourceUserId: String, senderDeviceId: String?) {
         when (msg.type) {
-            ClientMessage.Type.FRIEND_REQUEST -> {
-                friends.add(sourceUserId, msg.username, FriendStatus.PENDING_RECEIVED)
-            }
-            ClientMessage.Type.FRIEND_RESPONSE -> {
-                if (msg.accepted) friends.add(sourceUserId, msg.username, FriendStatus.ACCEPTED)
-            }
-            ClientMessage.Type.TEXT, ClientMessage.Type.IMAGE -> {
-                val msgId = UUID.randomUUID().toString()
-                val msgData = MessageData(
-                    id = msgId, conversationId = sourceUserId,
-                    authorDeviceId = senderDeviceId ?: "unknown",
-                    content = msg.text, timestamp = msg.timestamp,
-                    type = msg.type.name.lowercase()
-                )
-                messagesDomain.add(sourceUserId, msgData)
-                refreshConversation(sourceUserId)
-            }
-            ClientMessage.Type.DEVICE_ANNOUNCE -> {
-                val announce = msg.deviceAnnounce
-                if (announce.signature.size() > 0 && announce.recoveryPublicKey.size() > 0) {
-                    val payload = com.obscura.kit.crypto.RecoveryKeys.serializeAnnounceForSigning(
-                        announce.devicesList.map { it.deviceId }, announce.timestamp, announce.isRevocation
-                    )
-                    try {
-                        val pubKey = Curve.decodePoint(announce.recoveryPublicKey.toByteArray(), 0)
-                        if (!Curve.verifySignature(pubKey, payload, announce.signature.toByteArray())) {
-                            logger.decryptFailed(sourceUserId, "device announce signature invalid")
-                            return
-                        }
-                    } catch (e: Exception) {
-                        logger.decryptFailed(sourceUserId, "device announce signature verify error: ${e.message}")
-                        return
-                    }
-                }
-                friends.updateDevices(sourceUserId, announce.devicesList.map { d ->
-                    FriendDeviceInfo(d.deviceUuid, d.deviceId, d.deviceName)
-                })
-            }
-            ClientMessage.Type.MODEL_SYNC -> {
-                val sync = msg.modelSync
-                orm.handleSync(ModelSyncData(
-                    model = sync.model, id = sync.id, op = sync.op.number,
-                    timestamp = sync.timestamp, data = sync.data.toByteArray(),
-                    authorDeviceId = sync.authorDeviceId, signature = sync.signature.toByteArray()
-                ), sourceUserId)
-            }
-            ClientMessage.Type.SYNC_BLOB -> {
-                if (sourceUserId != userId) return
-                clientSyncManager.processSyncBlob(msg)
-            }
-            ClientMessage.Type.SENT_SYNC -> {
-                if (sourceUserId != userId) return
-                val ss = msg.sentSync
-                messagesDomain.add(ss.conversationId, MessageData(
-                    id = ss.messageId, conversationId = ss.conversationId,
-                    authorDeviceId = deviceId ?: "self", content = String(ss.content.toByteArray()),
-                    timestamp = ss.timestamp, type = "text"
-                ))
-                refreshConversation(ss.conversationId)
-            }
-            ClientMessage.Type.SESSION_RESET -> {
-                signalStore.deleteAllSessions(sourceUserId)
-            }
-            ClientMessage.Type.FRIEND_SYNC -> {
-                if (sourceUserId != userId) return
-                val fs = msg.friendSync
-                val status = if (fs.status == FriendStatus.ACCEPTED.value) FriendStatus.ACCEPTED else FriendStatus.PENDING_RECEIVED
-                if (fs.action == FriendSyncAction.ADD.value) {
-                    friends.add(sourceUserId, fs.username, status,
-                        fs.devicesList.map { FriendDeviceInfo(it.deviceUuid, it.deviceId, it.deviceName) })
-                } else if (fs.action == FriendSyncAction.REMOVE.value) {
-                    friends.remove(sourceUserId)
-                }
-            }
+            ClientMessage.Type.FRIEND_REQUEST -> handleFriendRequest(msg, sourceUserId)
+            ClientMessage.Type.FRIEND_RESPONSE -> handleFriendResponse(msg, sourceUserId)
+            ClientMessage.Type.TEXT, ClientMessage.Type.IMAGE -> handleTextMessage(msg, sourceUserId, senderDeviceId)
+            ClientMessage.Type.DEVICE_ANNOUNCE -> handleDeviceAnnounce(msg, sourceUserId)
+            ClientMessage.Type.MODEL_SYNC -> handleModelSync(msg, sourceUserId)
+            ClientMessage.Type.SYNC_BLOB -> handleSyncBlob(msg, sourceUserId)
+            ClientMessage.Type.SENT_SYNC -> handleSentSync(msg)
+            ClientMessage.Type.SESSION_RESET -> signalStore.deleteAllSessions(sourceUserId)
+            ClientMessage.Type.FRIEND_SYNC -> handleFriendSync(msg, sourceUserId)
             else -> { }
         }
     }
 
-    // ================================================================
-    // Conversation refresh
-    // ================================================================
+    private suspend fun handleFriendRequest(msg: ClientMessage, sourceUserId: String) {
+        friends.add(sourceUserId, msg.username, FriendStatus.PENDING_RECEIVED)
+    }
+
+    private suspend fun handleFriendResponse(msg: ClientMessage, sourceUserId: String) {
+        if (msg.accepted) friends.add(sourceUserId, msg.username, FriendStatus.ACCEPTED)
+    }
+
+    private suspend fun handleTextMessage(msg: ClientMessage, sourceUserId: String, senderDeviceId: String?) {
+        val msgId = UUID.randomUUID().toString()
+        val msgData = MessageData(
+            id = msgId, conversationId = sourceUserId,
+            authorDeviceId = senderDeviceId ?: "unknown",
+            content = msg.text, timestamp = msg.timestamp,
+            type = msg.type.name.lowercase()
+        )
+        messagesDomain.add(sourceUserId, msgData)
+        refreshConversation(sourceUserId)
+    }
+
+    private suspend fun handleDeviceAnnounce(msg: ClientMessage, sourceUserId: String) {
+        val announce = msg.deviceAnnounce
+        if (announce.signature.size() > 0 && announce.recoveryPublicKey.size() > 0) {
+            val payload = com.obscura.kit.crypto.RecoveryKeys.serializeAnnounceForSigning(
+                announce.devicesList.map { it.deviceId }, announce.timestamp, announce.isRevocation
+            )
+            try {
+                val pubKey = Curve.decodePoint(announce.recoveryPublicKey.toByteArray(), 0)
+                if (!Curve.verifySignature(pubKey, payload, announce.signature.toByteArray())) {
+                    logger.decryptFailed(sourceUserId, "device announce signature invalid")
+                    return
+                }
+            } catch (e: Exception) {
+                logger.decryptFailed(sourceUserId, "device announce signature verify error: ${e.message}")
+                return
+            }
+        }
+        friends.updateDevices(sourceUserId, announce.devicesList.map { d ->
+            FriendDeviceInfo(d.deviceUuid, d.deviceId, d.deviceName)
+        })
+    }
+
+    private suspend fun handleModelSync(msg: ClientMessage, sourceUserId: String) {
+        val sync = msg.modelSync
+        orm.handleSync(ModelSyncData(
+            model = sync.model, id = sync.id, op = sync.op.number,
+            timestamp = sync.timestamp, data = sync.data.toByteArray(),
+            authorDeviceId = sync.authorDeviceId, signature = sync.signature.toByteArray()
+        ), sourceUserId)
+    }
+
+    private suspend fun handleSyncBlob(msg: ClientMessage, sourceUserId: String) {
+        if (sourceUserId != userId) return
+        clientSyncManager.processSyncBlob(msg)
+    }
+
+    private suspend fun handleSentSync(msg: ClientMessage) {
+        val ss = msg.sentSync
+        messagesDomain.add(ss.conversationId, MessageData(
+            id = ss.messageId, conversationId = ss.conversationId,
+            authorDeviceId = deviceId ?: "self", content = String(ss.content.toByteArray()),
+            timestamp = ss.timestamp, type = "text"
+        ))
+        refreshConversation(ss.conversationId)
+    }
+
+    private suspend fun handleFriendSync(msg: ClientMessage, sourceUserId: String) {
+        if (sourceUserId != userId) return
+        val fs = msg.friendSync
+        val status = if (fs.status == FriendStatus.ACCEPTED.value) FriendStatus.ACCEPTED else FriendStatus.PENDING_RECEIVED
+        if (fs.action == FriendSyncAction.ADD.value) {
+            friends.add(sourceUserId, fs.username, status,
+                fs.devicesList.map { FriendDeviceInfo(it.deviceUuid, it.deviceId, it.deviceName) })
+        } else if (fs.action == FriendSyncAction.REMOVE.value) {
+            friends.remove(sourceUserId)
+        }
+    }
 
     private suspend fun refreshConversation(conversationId: String) {
         val msgs = messagesDomain.getMessages(conversationId)
@@ -548,10 +507,6 @@ class ObscuraClient(
         return msgs
     }
 
-    // ================================================================
-    // Messaging — delegates to MessagingManager
-    // ================================================================
-
     suspend fun send(friendUsername: String, text: String) = messagingManager.send(friendUsername, text)
     suspend fun sendAttachment(friendUsername: String, attachmentId: String, contentKey: ByteArray, nonce: ByteArray, mimeType: String, sizeBytes: Long) =
         messagingManager.sendAttachment(friendUsername, attachmentId, contentKey, nonce, mimeType, sizeBytes)
@@ -565,16 +520,8 @@ class ObscuraClient(
     suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray, expectedHash: ByteArray? = null): ByteArray =
         messagingManager.downloadDecryptedAttachment(id, contentKey, nonce, expectedHash)
 
-    // ================================================================
-    // Friends — delegates to FriendshipManager
-    // ================================================================
-
     suspend fun befriend(targetUserId: String, targetUsername: String) = friendshipManager.befriend(targetUserId, targetUsername)
     suspend fun acceptFriend(targetUserId: String, targetUsername: String) = friendshipManager.acceptFriend(targetUserId, targetUsername)
-
-    // ================================================================
-    // Devices — delegates to DeviceManager
-    // ================================================================
 
     suspend fun announceDevices() = deviceManager.announceDevices()
     suspend fun announceDeviceRevocation(friendUsername: String, remainingDeviceIds: List<String>) =
@@ -585,10 +532,6 @@ class ObscuraClient(
         deviceManager.approveLink(newDeviceId, challengeResponse)
     suspend fun takeoverDevice() = deviceManager.takeoverDevice()
 
-    // ================================================================
-    // Recovery — delegates to RecoveryManager
-    // ================================================================
-
     fun generateRecoveryPhrase(): String = recoveryManager.generateRecoveryPhrase()
     fun getRecoveryPhrase(): String? = recoveryManager.getRecoveryPhrase()
     fun getVerifyCode(): String? = recoveryManager.getVerifyCode()
@@ -598,19 +541,11 @@ class ObscuraClient(
     suspend fun downloadBackup(recoveryPhrase: String? = null): ParsedSyncBlob? = recoveryManager.downloadBackup(recoveryPhrase)
     suspend fun checkBackup(): Triple<Boolean, String?, Long?> = recoveryManager.checkBackup()
 
-    // ================================================================
-    // Sync — delegates to ClientSyncManager
-    // ================================================================
-
     suspend fun resetSessionWith(targetUserId: String, reason: String = "manual") =
         clientSyncManager.resetSessionWith(targetUserId, reason)
     suspend fun resetAllSessions(reason: String = "manual") = clientSyncManager.resetAllSessions(reason)
     suspend fun requestSync() = clientSyncManager.requestSync()
     suspend fun pushHistoryToDevice(targetDeviceId: String) = clientSyncManager.pushHistoryToDevice(targetDeviceId)
-
-    // ================================================================
-    // Wait (test escape hatch)
-    // ================================================================
 
     suspend fun waitForMessage(timeoutMs: Long = 15_000): ReceivedMessage {
         return kotlinx.coroutines.withTimeout(timeoutMs) { incomingMessages.receive() }

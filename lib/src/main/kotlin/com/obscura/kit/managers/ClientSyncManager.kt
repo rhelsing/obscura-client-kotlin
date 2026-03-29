@@ -1,11 +1,6 @@
 package com.obscura.kit.managers
 
-import com.obscura.kit.crypto.SignalStore
-import com.obscura.kit.stores.DeviceDomain
-import com.obscura.kit.stores.FriendDomain
 import com.obscura.kit.stores.MessageData
-import com.obscura.kit.stores.MessageDomain
-import com.obscura.kit.stores.MessengerDomain
 import obscura.v2.Client.ClientMessage
 import org.json.JSONArray
 import org.json.JSONObject
@@ -15,14 +10,15 @@ import java.util.*
  * Request sync, push history, reset sessions, process sync blobs.
  */
 internal class ClientSyncManager(
-    private val session: ClientSession,
-    private val signalStore: SignalStore,
-    private val messenger: MessengerDomain,
-    private val friends: FriendDomain,
-    private val devices: DeviceDomain,
-    private val messages: MessageDomain,
-    private val messageSender: MessageSender
+    private val ctx: ClientContext
 ) {
+    private val session get() = ctx.session
+    private val signalStore get() = ctx.signalStore
+    private val messenger get() = ctx.messenger
+    private val friends get() = ctx.friends
+    private val devices get() = ctx.devices
+    private val messages get() = ctx.messages
+    private val messageSender get() = ctx.messageSender
     suspend fun requestSync() {
         val selfTargets = devices.getSelfSyncTargets().filter { it != session.deviceId }
         val msg = ClientMessage.newBuilder()

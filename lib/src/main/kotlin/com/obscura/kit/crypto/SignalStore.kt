@@ -52,10 +52,6 @@ class SignalStore(
         return Pair(keyPair, registrationId)
     }
 
-    // ============================================================
-    // IdentityKeyStore
-    // ============================================================
-
     override fun getIdentityKeyPair(): IdentityKeyPair {
         return identityKeyPair ?: throw IllegalStateException("Identity not initialized")
     }
@@ -97,10 +93,6 @@ class SignalStore(
         return IdentityKey(stored)
     }
 
-    // ============================================================
-    // PreKeyStore
-    // ============================================================
-
     override fun loadPreKey(preKeyId: Int): PreKeyRecord {
         val record = db.signalKeyQueries.selectPreKey(preKeyId.toLong()).executeAsOneOrNull()
             ?: throw InvalidKeyIdException("No prekey with id: $preKeyId")
@@ -127,10 +119,6 @@ class SignalStore(
         return db.signalKeyQueries.highestPreKeyId().executeAsOne().MAX ?: 0L
     }
 
-    // ============================================================
-    // SignedPreKeyStore
-    // ============================================================
-
     override fun loadSignedPreKey(signedPreKeyId: Int): SignedPreKeyRecord {
         val record = db.signalKeyQueries.selectSignedPreKey(signedPreKeyId.toLong()).executeAsOneOrNull()
             ?: throw InvalidKeyIdException("No signed prekey with id: $signedPreKeyId")
@@ -153,10 +141,6 @@ class SignalStore(
     override fun removeSignedPreKey(signedPreKeyId: Int) {
         db.signalKeyQueries.deleteSignedPreKey(signedPreKeyId.toLong())
     }
-
-    // ============================================================
-    // SessionStore
-    // ============================================================
 
     override fun loadSession(address: SignalProtocolAddress): SessionRecord {
         val addressStr = "${address.name}.${address.deviceId}"
@@ -204,10 +188,6 @@ class SignalStore(
             .forEach { db.signalKeyQueries.deleteSession(it.address) }
     }
 
-    // ============================================================
-    // SenderKeyStore
-    // ============================================================
-
     override fun storeSenderKey(
         sender: SignalProtocolAddress,
         distributionId: UUID,
@@ -226,10 +206,6 @@ class SignalStore(
             ?: return null
         return SenderKeyRecord(record)
     }
-
-    // ============================================================
-    // KyberPreKeyStore
-    // ============================================================
 
     override fun loadKyberPreKey(kyberPreKeyId: Int): KyberPreKeyRecord {
         throw InvalidKeyIdException("Kyber not implemented")

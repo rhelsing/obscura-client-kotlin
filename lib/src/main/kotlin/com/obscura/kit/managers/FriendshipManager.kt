@@ -1,22 +1,20 @@
 package com.obscura.kit.managers
 
-import com.obscura.kit.stores.DeviceDomain
-import com.obscura.kit.stores.FriendDomain
 import com.obscura.kit.stores.FriendStatus
 import com.obscura.kit.stores.FriendSyncAction
-import com.obscura.kit.stores.MessengerDomain
 import obscura.v2.Client.ClientMessage
 
 /**
  * Befriend, acceptFriend, and syncFriendToOwnDevices.
  */
 internal class FriendshipManager(
-    private val session: ClientSession,
-    private val messenger: MessengerDomain,
-    private val friends: FriendDomain,
-    private val devices: DeviceDomain,
-    private val messageSender: MessageSender
+    private val ctx: ClientContext
 ) {
+    private val session get() = ctx.session
+    private val messenger get() = ctx.messenger
+    private val friends get() = ctx.friends
+    private val devices get() = ctx.devices
+    private val messageSender get() = ctx.messageSender
     suspend fun befriend(targetUserId: String, targetUsername: String) {
         messenger.fetchPreKeyBundles(targetUserId)
 
