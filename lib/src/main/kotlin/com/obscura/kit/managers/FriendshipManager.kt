@@ -16,6 +16,7 @@ internal class FriendshipManager(
     private val devices get() = ctx.devices
     private val messageSender get() = ctx.messageSender
     suspend fun befriend(targetUserId: String, targetUsername: String) {
+        require(targetUserId != session.userId) { "Cannot befriend yourself" }
         messenger.fetchPreKeyBundles(targetUserId)
 
         val msg = ClientMessage.newBuilder()

@@ -85,4 +85,26 @@ class StoryAttachmentTests {
         assertEquals(3, received.size)
         assertTrue(received.all { it.type == "MODEL_SYNC" })
     }
+
+    @Test @Order(4)
+    fun `10-5 - Story with text and image combined`() = runBlocking {
+        need()
+        val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xE0.toByte()) + ByteArray(500)
+        val (attId, _) = alice!!.uploadAttachment(jpeg)
+
+        alice!!.sendModelSync(bob!!.username!!, "story", "story_combo_${System.currentTimeMillis()}",
+            data = mapOf("content" to "check out this sunset", "mediaRef" to attId, "contentType" to "image/jpeg"))
+
+        val msg = bob!!.waitForMessage()
+        assertEquals("MODEL_SYNC", msg.type)
+        val data = org.json.JSONObject(String(msg.raw!!.modelSync.data.toByteArray()))
+        assertEquals("check out this sunset", data.getString("content"))
+        assertEquals(attId, data.getString("mediaRef"))
+        assertEquals("image/jpeg", data.getString("contentType"))
+
+        val downloaded = bob!!.downloadAttachment(attId)
+        assertEquals(jpeg.size, downloaded.size)
+
+        alice!!.disconnect(); bob!!.disconnect()
+    }
 }
