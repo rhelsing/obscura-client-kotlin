@@ -146,6 +146,15 @@ internal class DeviceManager(
             signedPreKey = signedPreKey.toApiJson(),
             oneTimePreKeys = oneTimePreKeys.toApiJson()
         ))
+
+        // Clear all old sessions — identity key changed, old sessions are invalid.
+        // Next send will do a fresh PreKey exchange with the new identity.
+        val allSessions = signalStore.getAllSessionRegistrationIds("")
+        // Delete sessions for all known friends
+        for (friend in friends.getAccepted()) {
+            signalStore.deleteAllSessions(friend.userId)
+        }
+
         messenger.mapDevice(
             requireNotNull(session.deviceId) { "deviceId not set - call register/login first" },
             requireNotNull(session.userId) { "userId not set - call register/login first" },

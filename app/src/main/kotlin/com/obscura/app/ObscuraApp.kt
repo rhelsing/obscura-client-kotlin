@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
+import app.cash.sqldelight.db.SqlDriver
 import app.cash.sqldelight.driver.android.AndroidSqliteDriver
 import com.obscura.kit.AuthState
 import com.obscura.kit.ObscuraClient
@@ -15,19 +16,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 
-/**
- * Application singleton — manages per-user ObscuraClient instances.
- *
- * Each username gets its own encrypted SQLite database (obscura_{username}.db)
- * with its own Keystore-sealed encryption key. Bob can't read Alice's DB.
- *
- * Flow:
- *   1. App opens → check for saved username in prefs
- *   2. If saved → openClientForUser(username) → restoreSession → connect
- *   3. If not → show login screen, wait for username
- *   4. On login/register → openClientForUser(username) → auth → save username
- *   5. On logout → disconnect, drop client, clear saved username
- */
 class ObscuraApp : Application() {
 
     var client: ObscuraClient? = null
@@ -39,6 +27,7 @@ class ObscuraApp : Application() {
     private lateinit var securePrefs: SharedPreferences
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var authObserverJob: Job? = null
+    private var currentDriver: SqlDriver? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -54,10 +43,9 @@ class ObscuraApp : Application() {
 
         System.loadLibrary("sqlcipher")
 
-        // Auto-restore last user if saved
         val savedUsername = securePrefs.getString("username", null)
         if (savedUsername != null) {
-            openClientForUser(savedUsername)
+            createClientForUser(savedUsername)
             val savedToken = securePrefs.getString("token", null)
             val savedUserId = securePrefs.getString("userId", null)
             if (savedToken != null && savedUserId != null) {
@@ -76,10 +64,13 @@ class ObscuraApp : Application() {
         }
     }
 
-    fun openClientForUser(username: String) {
-        // Tear down previous client if switching users
+    @Synchronized
+    fun createClientForUser(username: String) {
+        if (_currentUsername.value == username && client != null) return
+
         authObserverJob?.cancel()
         client?.disconnect()
+        try { currentDriver?.close() } catch (_: Exception) {}
 
         val dbSecret = DatabaseSecretProvider.getOrCreate(applicationContext, username)
         val factory = SupportOpenHelperFactory(dbSecret, null, false)
@@ -96,6 +87,7 @@ class ObscuraApp : Application() {
                 }
             }
         )
+        currentDriver = driver
 
         client = ObscuraClient(
             config = ObscuraConfig(apiUrl = "https://obscura.barrelmaker.dev"),
@@ -104,7 +96,6 @@ class ObscuraApp : Application() {
 
         _currentUsername.value = username
 
-        // Auto-save session on auth state changes
         authObserverJob = scope.launch {
             client!!.authState.collectLatest { state ->
                 if (state == AuthState.AUTHENTICATED) {

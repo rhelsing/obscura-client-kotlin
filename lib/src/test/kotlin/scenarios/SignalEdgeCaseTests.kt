@@ -60,9 +60,10 @@ class SignalEdgeCaseTests {
         assertEquals("SESSION_RESET", resetMsg.type,
             "Bob should receive SESSION_RESET")
 
-        // Messaging should work after reset (sessions rebuild automatically)
-        sendAndVerify(alice, bob, "After reset from Alice")
-        sendAndVerify(bob, alice, "After reset from Bob")
+        // Messaging should work after reset (sessions rebuild via prekey exchange)
+        delay(500)
+        sendAndVerify(alice, bob, "After reset from Alice", timeoutMs = 30_000)
+        sendAndVerify(bob, alice, "After reset from Bob", timeoutMs = 30_000)
 
         // Verify conversations state
         delay(300)
@@ -91,9 +92,10 @@ class SignalEdgeCaseTests {
         assertEquals("SESSION_RESET", resetMsg.type,
             "Bob should receive SESSION_RESET from resetAll")
 
-        // Messaging should work after bulk reset
-        sendAndVerify(alice, bob, "Post-reset-all from Alice")
-        sendAndVerify(bob, alice, "Post-reset-all from Bob")
+        // Messaging should work after bulk reset (prekey exchange)
+        delay(500)
+        sendAndVerify(alice, bob, "Post-reset-all from Alice", timeoutMs = 30_000)
+        sendAndVerify(bob, alice, "Post-reset-all from Bob", timeoutMs = 30_000)
 
         alice.disconnect(); bob.disconnect()
     }

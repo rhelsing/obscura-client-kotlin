@@ -77,6 +77,11 @@ internal class ClientSyncManager(
             .setTimestamp(System.currentTimeMillis()).build()
 
         messageSender.sendToAllDevices(targetUserId, msg)
+
+        // Delete the session that was just built to send the reset message.
+        // This forces the next send to use a fresh PreKey exchange,
+        // which the receiver can handle after they also cleared their session.
+        signalStore.deleteAllSessions(targetUserId)
     }
 
     suspend fun resetAllSessions(reason: String = "manual") {

@@ -33,8 +33,9 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 val currentUsername by app.currentUsername.collectAsState()
                 val client = app.client
+                val authState = client?.authState?.collectAsState()?.value ?: AuthState.LOGGED_OUT
 
-                if (client != null && client.authState.collectAsState().value == AuthState.AUTHENTICATED) {
+                if (client != null && authState == AuthState.AUTHENTICATED) {
                     val friendList by client.friendList.collectAsState()
                     val pendingRequests by client.pendingRequests.collectAsState()
                     ConnectedScreen(client, app, friendList, pendingRequests)
@@ -81,12 +82,19 @@ fun RegisterScreen(app: ObscuraApp) {
                 scope.launch {
                     try {
                         statusText = "Registering '$username'..."
+                        android.util.Log.d("REG", "0: button clicked, about to withContext IO")
+                        android.util.Log.d("REG", "1: createClientForUser($username)")
                         withContext(Dispatchers.IO) {
-                            app.openClientForUser(username)
+                            app.createClientForUser(username)
+                            android.util.Log.d("REG", "2: client created, calling register")
                             app.client!!.register(username, password)
+                            android.util.Log.d("REG", "3: register returned, authState=${app.client!!.authState.value}")
                         }
+                        android.util.Log.d("REG", "4: withContext done")
                     } catch (e: CancellationException) {
+                        android.util.Log.d("REG", "CANCELLED: ${e.message}")
                     } catch (e: Exception) {
+                        android.util.Log.e("REG", "ERROR: ${e::class.simpleName}: ${e.message}", e)
                         statusText = "Error: ${e::class.simpleName}: ${e.message}"
                     }
                 }
@@ -98,7 +106,7 @@ fun RegisterScreen(app: ObscuraApp) {
                     try {
                         statusText = "Logging in..."
                         withContext(Dispatchers.IO) {
-                            app.openClientForUser(username)
+                            app.createClientForUser(username)
                             app.client!!.login(username, password)
                         }
                     } catch (e: CancellationException) {

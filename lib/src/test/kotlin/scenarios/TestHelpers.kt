@@ -53,13 +53,13 @@ suspend fun becomeFriends(a: ObscuraClient, b: ObscuraClient) {
     assertEquals(bFriendsBefore + 1, b.friendList.value.size)
 }
 
-suspend fun sendAndVerify(sender: ObscuraClient, receiver: ObscuraClient, text: String) {
+suspend fun sendAndVerify(sender: ObscuraClient, receiver: ObscuraClient, text: String, timeoutMs: Long = 15_000) {
     sender.send(receiver.username!!, text)
-    val msg = receiver.waitForMessage()
+    val msg = receiver.waitForMessage(timeoutMs)
     assertEquals("TEXT", msg.type)
     assertEquals(text, msg.text)
     assertEquals(sender.userId, msg.sourceUserId)
-    delay(300)
+    delay(500)
 
     // Verify receiver's conversations has it
     val recvMsgs = receiver.getMessages(sender.userId!!)

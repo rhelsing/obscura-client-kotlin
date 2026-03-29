@@ -74,6 +74,11 @@ class DeviceLinkFlowTests {
 
         becomeFriends(device1, carol)
 
+        // Device2 may have queued friend sync messages — drain them
+        try {
+            while (true) { device2.waitForMessage(2_000) }
+        } catch (_: Exception) { /* drained */ }
+
         // Carol sends to user - both devices should receive
         carol.send(username, "Message for both devices")
 

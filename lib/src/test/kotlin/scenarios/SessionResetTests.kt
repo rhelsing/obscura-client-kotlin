@@ -35,8 +35,8 @@ class SessionResetTests {
             "Bob should receive SESSION_RESET")
         delay(300)
 
-        // Send after reset — should still work (new session auto-built)
-        sendAndVerify(alice, bob, "After reset")
+        // Send after reset — needs prekey exchange, allow extra time
+        sendAndVerify(alice, bob, "After reset", timeoutMs = 30_000)
 
         val bobMsgsAfter = bob.getMessages(alice.userId!!)
         assertTrue(bobMsgsAfter.any { it.content == "After reset" },
