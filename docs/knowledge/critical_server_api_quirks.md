@@ -14,7 +14,11 @@ Server: `obscura.barrelmaker.dev` (OpenAPI spec at `/openapi.yaml`)
 
 4. **`POST /v1/gateway/ticket` returns 201** not 200. OkHttp's `isSuccessful` handles this, but don't check for `response.code == 200`.
 
-5. **Registration rate limit is aggressive.** Need `Thread.sleep(500)` between registrations or you get 429. Tests that register multiple users in `@BeforeAll` must space them out.
+5. **Rate limits per instance (3 instances load balanced):**
+   - **Auth endpoints** (register, login, provision, refresh): 1 req/s sustained, 3 req/s burst
+   - **All other endpoints**: 10 req/s sustained, 20 req/s burst
+   - Rate is tracked per server instance, and there are 3 behind the load balancer, so effective limits are ~3x
+   - The 500ms `authRateLimitDelayMs` in tests covers auth. General endpoints rarely hit limits unless running 200+ tests in sequence.
 
 6. **Backup download with same ETag returns 304.** After `uploadBackup()`, calling `downloadBackup()` with the cached etag returns 304 (not modified) → null. For fresh download, pass etag=null.
 

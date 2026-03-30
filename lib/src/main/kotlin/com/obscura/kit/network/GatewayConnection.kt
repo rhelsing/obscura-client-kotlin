@@ -18,39 +18,43 @@ enum class GatewayState {
 
 /**
  * WebSocket connection to Obscura gateway.
- * Handles automatic reconnection and message delivery.
+ *
+ * Keeps the connection alive with:
+ * - OkHttp ping every 30s (keeps NAT/proxy alive)
+ * - Auto-reconnect with exponential backoff (1s → 30s)
+ * - Token refresh before reconnect attempts
+ * - Intentional disconnect (code 1000) suppresses reconnect
  */
 class GatewayConnection(
     private val api: APIClient,
     private val scope: CoroutineScope
 ) {
     private val client = OkHttpClient.Builder()
-        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)  // if no data or pong for 90s, connection is dead
+        .pingInterval(30, TimeUnit.SECONDS) // keepalive — triggers onFailure if pong missing
         .build()
 
     private var webSocket: WebSocket? = null
     private var reconnectJob: Job? = null
-    private var reconnectBackoffMs = 3000L
+    private var reconnectAttempts = 0
+    private var shouldReconnect = true
 
     private val _state = MutableStateFlow(GatewayState.DISCONNECTED)
     val state: StateFlow<GatewayState> = _state
 
-    /** Channel for received envelopes */
     val envelopes = Channel<Envelope>(capacity = 1000)
-
-    /** Channel for prekey status notifications */
     val preKeyStatus = Channel<PreKeyStatus>(capacity = 10)
 
-    /** Callback for connection events */
     var onConnected: (() -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
 
-    /**
-     * Connect to the gateway using a ticket-based auth flow.
-     */
+    /** Called before reconnect to ensure token is fresh. Set by ObscuraClient. */
+    var ensureFreshToken: (suspend () -> Boolean) = { true }
+
     suspend fun connect() {
         if (_state.value == GatewayState.CONNECTED || _state.value == GatewayState.CONNECTING) return
         _state.value = GatewayState.CONNECTING
+        shouldReconnect = true
 
         try {
             val ticket = api.fetchGatewayTicket()
@@ -62,10 +66,8 @@ class GatewayConnection(
         }
     }
 
-    /**
-     * Disconnect from the gateway.
-     */
     fun disconnect() {
+        shouldReconnect = false
         reconnectJob?.cancel()
         reconnectJob = null
         webSocket?.close(1000, "Client disconnect")
@@ -74,9 +76,6 @@ class GatewayConnection(
         onDisconnected?.invoke()
     }
 
-    /**
-     * Send an ACK for processed message IDs.
-     */
     fun ack(messageIds: List<com.google.protobuf.ByteString>) {
         val ackMsg = AckMessage.newBuilder()
             .addAllMessageIds(messageIds)
@@ -95,7 +94,7 @@ class GatewayConnection(
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 _state.value = GatewayState.CONNECTED
-                reconnectBackoffMs = 3000L // Reset on successful connect
+                reconnectAttempts = 0
                 onConnected?.invoke()
             }
 
@@ -103,31 +102,27 @@ class GatewayConnection(
                 try {
                     val frame = WebSocketFrame.parseFrom(bytes.toByteArray())
                     when {
-                        frame.hasPreKeyStatus() -> {
-                            preKeyStatus.trySend(frame.preKeyStatus)
-                        }
+                        frame.hasPreKeyStatus() -> preKeyStatus.trySend(frame.preKeyStatus)
                         frame.hasEnvelopeBatch() -> {
                             for (envelope in frame.envelopeBatch.envelopesList) {
                                 envelopes.trySend(envelope)
                             }
                         }
                     }
-                } catch (e: Exception) {
-                    // Failed to parse frame — skip
-                }
+                } catch (_: Exception) {}
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 _state.value = GatewayState.DISCONNECTED
-                scheduleReconnect()
+                if (shouldReconnect) scheduleReconnect()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 _state.value = GatewayState.DISCONNECTED
-                if (code != 1000) {
-                    scheduleReconnect()
-                }
                 onDisconnected?.invoke()
+                // Reconnect on unexpected close (server restart, timeout, etc.)
+                // Don't reconnect on intentional close (code 1000)
+                if (code != 1000 && shouldReconnect) scheduleReconnect()
             }
         })
     }
@@ -136,12 +131,19 @@ class GatewayConnection(
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
             _state.value = GatewayState.RECONNECTING
-            delay(reconnectBackoffMs)
+
+            // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s max
+            val delayMs = (1000L * (1L shl reconnectAttempts.coerceAtMost(5))).coerceAtMost(30_000L)
+            delay(delayMs)
+            reconnectAttempts++
+
             try {
+                // Refresh token before reconnecting — stale token = failed ticket fetch
+                ensureFreshToken()
                 connect()
-            } catch (e: Exception) {
-                reconnectBackoffMs = (reconnectBackoffMs * 2).coerceAtMost(60_000L)
-                scheduleReconnect()
+            } catch (_: Exception) {
+                // connect() failed — will retry via onFailure → scheduleReconnect
+                if (shouldReconnect) scheduleReconnect()
             }
         }
     }

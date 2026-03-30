@@ -47,7 +47,9 @@ class ORMMessageTests {
         val data = JSONObject(String(sync.data.toByteArray()))
         assertEquals("Hello via ORM!", data.getString("content"))
         assertEquals(alice.username, data.getString("senderUsername"))
-        assertEquals(bob.userId, data.getString("conversationId"))
+        val expectedConvId = listOf(alice.userId!!, bob.userId!!).sorted().joinToString("_")
+        assertEquals(expectedConvId, data.getString("conversationId"),
+            "conversationId should be canonical (sorted userIds)")
 
         alice.disconnect()
         bob.disconnect()

@@ -245,6 +245,9 @@ class ObscuraClient(
         messageSender = MessageSender(messenger, authManager)
         ctx.messageSender = messageSender
 
+        // Wire gateway reconnect token refresh
+        gateway.ensureFreshToken = { authManager.ensureFreshToken() }
+
         // Wire ORM auto-sync: model.create() → encrypt → fan out → flush
         syncManager.getSelfSyncTargets = { devices.getSelfSyncTargets() }
         syncManager.getFriendTargets = {

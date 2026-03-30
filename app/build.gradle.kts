@@ -66,6 +66,9 @@ dependencies {
     // Serialization (typed ORM models)
     implementation(libs.serialization.json)
 
+    // Lifecycle (foreground reconnect)
+    implementation("androidx.lifecycle:lifecycle-process:2.8.3")
+
     // Secure storage
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 

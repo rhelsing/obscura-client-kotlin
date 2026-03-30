@@ -40,7 +40,8 @@ class SignalManager {
     private val THROTTLE_MS = 2000L
 
     suspend fun emit(model: String, signal: String, data: Map<String, Any?>, authorDeviceId: String) {
-        val throttleKey = "$model:$signal:$authorDeviceId"
+        val contextKey = data["conversationId"] as? String ?: "global"
+        val throttleKey = "$model:$signal:$contextKey:$authorDeviceId"
         val now = System.currentTimeMillis()
         val last = lastSent[throttleKey] ?: 0L
         if (now - last < THROTTLE_MS) return
