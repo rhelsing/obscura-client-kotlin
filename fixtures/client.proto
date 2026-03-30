@@ -258,3 +258,13 @@ message ModelSync {
     DELETE = 2;                     // Soft delete (tombstone)
   }
 }
+
+// Ephemeral model signal — ECS behavior attached to a model
+// Not persisted, not CRDT-merged. In-memory only, auto-expires.
+// Used for typing indicators, read receipts, online status.
+message ModelSignal {
+  string model = 1;                 // Which model: "directMessage"
+  string signal = 2;                // Signal name: "typing", "stoppedTyping", "read"
+  bytes data = 3;                   // Context: {"conversationId": "..."}
+  string author_device_id = 4;      // Who sent this signal
+}

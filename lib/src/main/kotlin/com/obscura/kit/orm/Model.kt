@@ -22,7 +22,8 @@ class Model(
     internal val syncManager: SyncManager? = null,
     private val ttlManager: TTLManager? = null,
     private val deviceId: String = "",
-    internal val store: ModelStore? = null
+    internal val store: ModelStore? = null,
+    internal var signalManager: SignalManager? = null
 ) {
 
     suspend fun create(data: Map<String, Any?>): OrmEntry {
@@ -143,6 +144,45 @@ class Model(
     suspend fun delete(id: String) {
         if (config.sync != "lww") throw IllegalStateException("Delete only supported for LWW models")
         lwwMap?.delete(id, deviceId)
+    }
+
+    // ─── ECS Signals (ephemeral, not persisted) ─────────────────
+
+    /** Username of the local user — set by ObscuraClient when wiring. */
+    internal var localUsername: String = ""
+
+    /**
+     * Send a typing indicator for a conversation.
+     * Auto-throttled: sends at most once per 2 seconds.
+     */
+    suspend fun typing(conversationId: String) {
+        signalManager?.emit(name, "typing", mapOf("conversationId" to conversationId, "senderUsername" to localUsername), deviceId)
+    }
+
+    /** Explicitly stop typing. */
+    suspend fun stopTyping(conversationId: String) {
+        signalManager?.emit(name, "stoppedTyping", mapOf("conversationId" to conversationId, "senderUsername" to localUsername), deviceId)
+    }
+
+    /** Send a read receipt. */
+    suspend fun read(conversationId: String) {
+        signalManager?.emit(name, "read", mapOf("conversationId" to conversationId, "senderUsername" to localUsername), deviceId)
+    }
+
+    /**
+     * Observe who is typing in a conversation.
+     * Returns Flow<List<String>> — list of usernames currently typing.
+     * Auto-expires after 3 seconds of no signal.
+     */
+    fun observeTyping(conversationId: String): Flow<List<String>> {
+        return signalManager?.observe(name, "typing", conversationId)
+            ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    }
+
+    /** Observe read receipts for a conversation. */
+    fun observeRead(conversationId: String): Flow<List<String>> {
+        return signalManager?.observe(name, "read", conversationId)
+            ?: kotlinx.coroutines.flow.flowOf(emptyList())
     }
 
     suspend fun handleSync(modelSync: ModelSyncData): OrmEntry? {

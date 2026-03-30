@@ -10,7 +10,9 @@ class Schema(
     private val store: ModelStore,
     private val syncManager: SyncManager,
     private val ttlManager: TTLManager,
-    private val deviceId: String = ""
+    private val deviceId: String = "",
+    private val signalManager: SignalManager? = null,
+    var username: String = ""
 ) {
     private val models = mutableMapOf<String, Model>()
 
@@ -18,25 +20,22 @@ class Schema(
         for ((name, config) in definitions) {
             val model = if (config.sync == "lww") {
                 Model(
-                    name = name,
-                    config = config,
+                    name = name, config = config,
                     lwwMap = LWWMap(store, name),
-                    syncManager = syncManager,
-                    ttlManager = ttlManager,
-                    deviceId = deviceId,
-                    store = store
+                    syncManager = syncManager, ttlManager = ttlManager,
+                    deviceId = deviceId, store = store,
+                    signalManager = signalManager
                 )
             } else {
                 Model(
-                    name = name,
-                    config = config,
+                    name = name, config = config,
                     gset = GSet(store, name),
-                    syncManager = syncManager,
-                    ttlManager = ttlManager,
-                    deviceId = deviceId,
-                    store = store
+                    syncManager = syncManager, ttlManager = ttlManager,
+                    deviceId = deviceId, store = store,
+                    signalManager = signalManager
                 )
             }
+            model.localUsername = username
             models[name] = model
             syncManager.register(name, model)
         }

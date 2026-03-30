@@ -11,6 +11,7 @@ import com.obscura.kit.network.APIClient
 import com.obscura.kit.network.GatewayConnection
 import com.obscura.kit.network.UploadDeviceKeysRequest
 import com.obscura.kit.orm.ModelStore
+import com.obscura.kit.orm.SignalManager
 import com.obscura.kit.orm.ModelSyncData
 import com.obscura.kit.orm.SyncManager
 import com.obscura.kit.orm.TTLManager
@@ -98,6 +99,7 @@ class ObscuraClient(
     private val modelStore: ModelStore
     private val syncManager: SyncManager
     private val ttlManager: TTLManager
+    private val signalManager: SignalManager
 
     // Session — shared mutable state
     private val session = ClientSession()
@@ -167,9 +169,10 @@ class ObscuraClient(
         modelStore = ModelStore(db)
         syncManager = SyncManager(modelStore)
         ttlManager = TTLManager(modelStore)
+        signalManager = SignalManager()
         gateway = GatewayConnection(api, scope)
 
-        orm = SchemaDomain(modelStore, syncManager, ttlManager)
+        orm = SchemaDomain(modelStore, syncManager, ttlManager, signalManager = signalManager)
 
         // Create ClientContext — shared dependencies for all managers
         val ctx = ClientContext(
@@ -267,6 +270,35 @@ class ObscuraClient(
             messenger.flushMessages()
         }
 
+        // Wire ECS signal sending — JSON in text field for cross-platform interop
+        signalManager.sendSignal = { modelName, signalName, signalData ->
+            val payload = org.json.JSONObject().apply {
+                put("model", modelName)
+                put("signal", signalName)
+                put("data", org.json.JSONObject(signalData))
+                put("authorDeviceId", session.deviceId ?: "")
+                put("timestamp", System.currentTimeMillis())
+            }
+            val signalMsg = obscura.v2.Client.ClientMessage.newBuilder()
+                .setType(obscura.v2.Client.ClientMessage.Type.MODEL_SIGNAL)
+                .setTimestamp(System.currentTimeMillis())
+                .setText(payload.toString())
+                .build()
+            authManager.ensureFreshToken()
+            val accepted = friends.getAccepted()
+            for (f in accepted) {
+                var deviceIds = messenger.getDeviceIdsForUser(f.userId)
+                if (deviceIds.isEmpty()) {
+                    try { messenger.fetchPreKeyBundles(f.userId) } catch (_: Exception) {}
+                    deviceIds = messenger.getDeviceIdsForUser(f.userId)
+                }
+                for (devId in deviceIds) {
+                    messenger.queueMessage(devId, signalMsg, f.userId)
+                }
+            }
+            messenger.flushMessages()
+        }
+
         recoveryManager = RecoveryManager(ctx = ctx, config = config)
 
         friendshipManager = FriendshipManager(ctx = ctx)
@@ -322,8 +354,15 @@ class ObscuraClient(
         )
     }
 
-    suspend fun register(username: String, password: String) = authManager.register(username, password)
-    suspend fun login(username: String, password: String) = authManager.login(username, password)
+    suspend fun register(username: String, password: String) {
+        authManager.register(username, password)
+        orm.setUsername(username)
+    }
+    suspend fun login(username: String, password: String): com.obscura.kit.network.LoginResult {
+        val result = authManager.login(username, password)
+        orm.setUsername(username)
+        return result
+    }
     suspend fun loginAndProvision(username: String, password: String, deviceName: String = "Device 2") =
         authManager.loginAndProvision(username, password, deviceName)
 
@@ -334,7 +373,10 @@ class ObscuraClient(
         deviceId: String?,
         username: String?,
         registrationId: Int = 0
-    ) = authManager.restoreSession(token, refreshToken, userId, deviceId, username, registrationId)
+    ) {
+        authManager.restoreSession(token, refreshToken, userId, deviceId, username, registrationId)
+        if (username != null) orm.setUsername(username)
+    }
 
     fun hasSession(): Boolean = authManager.hasSession()
     suspend fun logout() = authManager.logout()
@@ -473,6 +515,7 @@ class ObscuraClient(
             ClientMessage.Type.SESSION_RESET -> signalStore.deleteAllSessions(sourceUserId)
             ClientMessage.Type.FRIEND_SYNC -> handleFriendSync(msg, sourceUserId)
             ClientMessage.Type.DEVICE_LINK_APPROVAL -> handleLinkApproval(msg, sourceUserId)
+            ClientMessage.Type.MODEL_SIGNAL -> handleModelSignal(msg, sourceUserId)
             else -> { }
         }
     }
@@ -517,6 +560,51 @@ class ObscuraClient(
         friends.updateDevices(sourceUserId, announce.devicesList.map { d ->
             FriendDeviceInfo(d.deviceUuid, d.deviceId, d.deviceName)
         })
+    }
+
+    private fun handleModelSignal(msg: ClientMessage, sourceUserId: String) {
+        try {
+            // Try JSON in text field first (cross-platform wire format)
+            val json = if (msg.text.isNotBlank() && msg.text.startsWith("{")) {
+                org.json.JSONObject(msg.text)
+            } else null
+
+            val modelName: String
+            val signalName: String
+            val authorDeviceId: String
+            val data: Map<String, Any?>
+
+            if (json != null && json.has("model") && json.has("signal")) {
+                modelName = json.getString("model")
+                signalName = json.getString("signal")
+                authorDeviceId = json.optString("authorDeviceId", sourceUserId)
+                val dataJson = json.optJSONObject("data") ?: org.json.JSONObject()
+                val map = mutableMapOf<String, Any?>()
+                for (key in dataJson.keys()) { map[key] = if (dataJson.isNull(key)) null else dataJson.get(key) }
+                data = map
+            } else {
+                // Fallback: proto field
+                val sig = msg.modelSignal ?: return
+                if (sig.model.isBlank()) return
+                modelName = sig.model
+                signalName = sig.signal
+                authorDeviceId = sig.authorDeviceId.ifBlank { sourceUserId }
+                data = try {
+                    val j = org.json.JSONObject(String(sig.data.toByteArray()))
+                    val m = mutableMapOf<String, Any?>()
+                    for (k in j.keys()) { m[k] = if (j.isNull(k)) null else j.get(k) }
+                    m
+                } catch (_: Exception) { emptyMap() }
+            }
+
+            if (signalName == "stoppedTyping") {
+                signalManager.clear(modelName, "typing", data, authorDeviceId)
+            } else {
+                signalManager.receive(modelName, signalName, data, authorDeviceId)
+            }
+        } catch (_: Exception) {
+            // Never let signal handling crash the envelope loop
+        }
     }
 
     private suspend fun handleModelSync(msg: ClientMessage, sourceUserId: String) {

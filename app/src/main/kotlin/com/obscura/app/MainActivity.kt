@@ -21,6 +21,7 @@ import com.obscura.kit.network.LoginScenario
 import com.obscura.kit.orm.ModelConfig
 import com.obscura.kit.orm.TypedModel
 import com.obscura.kit.stores.FriendStatus
+import androidx.compose.animation.core.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -549,37 +550,69 @@ fun ChatTab(client: ObscuraClient) {
             val friend = accepted.find { it.username == selectedFriend }
             val friendId = friend?.userId
             val convId = if (friendId != null) canonicalConversationId(client.userId ?: "", friendId) else ""
+            val dmModel = client.orm.model("directMessage")
 
-            // Filter messages for this conversation from ORM
             val conversationMsgs = allMessages
                 .filter { it.value.conversationId == convId }
                 .sortedBy { it.timestamp }
 
-            TextButton(onClick = { selectedFriend = null }) { Text("Back") }
-            Text(selectedFriend!!, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(8.dp))
+            val typers by dmModel.observeTyping(convId).collectAsState(emptyList())
 
-            LazyColumn(Modifier.weight(1f), reverseLayout = true) {
-                items(conversationMsgs.reversed(), key = { it.id }) { msg ->
+            // Header
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { selectedFriend = null }) { Text("<") }
+                Text(selectedFriend!!, style = MaterialTheme.typography.titleLarge)
+            }
+
+            // Messages — grows from top, scrolls down
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.Bottom
+            ) {
+                items(conversationMsgs, key = { it.id }) { msg ->
                     val isMe = msg.value.senderUsername == client.username
                     Row(
-                        Modifier.fillMaxWidth(),
+                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                         horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start
                     ) {
                         Surface(
                             tonalElevation = if (isMe) 4.dp else 1.dp,
                             shape = MaterialTheme.shapes.medium,
-                            modifier = Modifier.padding(vertical = 2.dp)
+                            color = if (isMe) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant
                         ) {
                             Text(msg.value.content, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
                         }
                     }
                 }
+                // Typing bubble appears at the end (where next message would be)
+                if (typers.isNotEmpty()) {
+                    item(key = "__typing__") {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                            horizontalArrangement = Arrangement.Start
+                        ) {
+                            TypingBubble()
+                        }
+                    }
+                }
             }
 
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Input — pinned to bottom
+            Divider()
+            Row(
+                Modifier.fillMaxWidth().padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 OutlinedTextField(
-                    value = messageText, onValueChange = { messageText = it },
+                    value = messageText,
+                    onValueChange = { newText ->
+                        messageText = newText
+                        if (newText.isNotBlank()) {
+                            scope.launch { withContext(Dispatchers.IO) { dmModel.typing(convId) } }
+                        }
+                    },
                     modifier = Modifier.weight(1f), singleLine = true,
                     placeholder = { Text("Message") }
                 )
@@ -590,7 +623,7 @@ fun ChatTab(client: ObscuraClient) {
                         messageText = ""
                         scope.launch {
                             withContext(Dispatchers.IO) {
-                                val convId = canonicalConversationId(client.userId ?: "", friendId ?: "")
+                                dmModel.stopTyping(convId)
                                 messages.create(DirectMessage(
                                     conversationId = convId,
                                     content = text,
@@ -600,6 +633,42 @@ fun ChatTab(client: ObscuraClient) {
                         }
                     }
                 ) { Text("Send") }
+            }
+        }
+    }
+}
+
+// ─── Typing Bubble (animated three dots) ──────────────────────
+
+@Composable
+fun TypingBubble() {
+    val infiniteTransition = rememberInfiniteTransition(label = "typing")
+
+    Surface(
+        tonalElevation = 1.dp,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.padding(vertical = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            repeat(3) { index ->
+                val alpha by infiniteTransition.animateFloat(
+                    initialValue = 0.3f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(600, easing = LinearEasing, delayMillis = index * 200),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "dot$index"
+                )
+                Surface(
+                    modifier = Modifier.size(8.dp),
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = alpha)
+                ) {}
             }
         }
     }

@@ -12,24 +12,21 @@ class SchemaDomain internal constructor(
     private val store: ModelStore,
     private val syncManager: SyncManager,
     private val ttlManager: TTLManager,
-    private val deviceId: String = ""
+    private val deviceId: String = "",
+    private val signalManager: SignalManager? = null
 ) {
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(1)
-    private val schema = Schema(store, syncManager, ttlManager, deviceId)
+    private val schema = Schema(store, syncManager, ttlManager, deviceId, signalManager)
+
+    /** Set the local username — used for signal senderUsername. */
+    fun setUsername(username: String) { schema.username = username }
 
     suspend fun define(definitions: Map<String, ModelConfig>) = withContext(dispatcher) {
         schema.define(definitions)
     }
 
-    /**
-     * Get a model by name. Throws if not defined.
-     *   val post = client.orm.model("post")  // no !!, no suspend
-     */
     fun model(name: String): Model = schema.model(name)
 
-    /**
-     * Get a model or null if not defined.
-     */
     fun modelOrNull(name: String): Model? = schema.modelOrNull(name)
 
     suspend fun handleSync(modelSync: ModelSyncData, from: String): OrmEntry? = withContext(dispatcher) {
