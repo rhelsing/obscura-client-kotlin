@@ -6,6 +6,18 @@ plugins {
     alias(libs.plugins.protobuf)
     alias(libs.plugins.sqldelight)
     `java-library`
+    `maven-publish`
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            groupId = "com.obscura"
+            artifactId = "obscura-kit"
+            version = "0.1.0"
+            from(components["java"])
+        }
+    }
 }
 
 java {

@@ -25,7 +25,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import com.obscura.kit.orm.ModelConfig
+import com.obscura.kit.persistence.NoOpSessionStorage
+import com.obscura.kit.persistence.SessionStorage
 import obscura.v2.Client.ClientMessage
+import org.json.JSONObject
 import org.signal.libsignal.protocol.ecc.Curve
 import java.util.*
 
@@ -57,7 +61,8 @@ enum class AuthState { LOGGED_OUT, PENDING_APPROVAL, AUTHENTICATED }
  */
 class ObscuraClient(
     val config: ObscuraConfig,
-    externalDriver: app.cash.sqldelight.db.SqlDriver? = null
+    externalDriver: app.cash.sqldelight.db.SqlDriver? = null,
+    val sessionStorage: SessionStorage = NoOpSessionStorage
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -77,7 +82,12 @@ class ObscuraClient(
     val conversations: StateFlow<Map<String, List<MessageData>>> = _conversations
 
     private val _events = MutableSharedFlow<ReceivedMessage>(extraBufferCapacity = 64)
+    @Deprecated("Use typedEvents instead — single typed event stream for bridges")
     val events: SharedFlow<ReceivedMessage> = _events
+
+    // Typed event stream — bridges subscribe to this instead of observing 5 separate flows
+    private val _typedEvents = MutableSharedFlow<ObscuraEvent>(extraBufferCapacity = 64)
+    val typedEvents: SharedFlow<ObscuraEvent> = _typedEvents
 
     private val driver = externalDriver ?: if (config.databasePath != null) {
         JdbcSqliteDriver("jdbc:sqlite:${config.databasePath}")
@@ -409,22 +419,194 @@ class ObscuraClient(
     suspend fun wipeDevice() = authManager.wipeDevice()
     suspend fun ensureFreshToken(): Boolean = authManager.ensureFreshToken()
 
+    // ─── Session Persistence (kit-owned) ──────────────────
+
+    /** Persist current session to storage. Auto-called on auth/connect. */
+    fun persistSession() {
+        val data = mapOf<String, Any?>(
+            "token" to token,
+            "refreshToken" to refreshToken,
+            "userId" to userId,
+            "deviceId" to deviceId,
+            "username" to username,
+            "registrationId" to registrationId
+        )
+        sessionStorage.save(data)
+        log("SESSION persisted user=$username")
+    }
+
+    /**
+     * Restore session from storage, define cached models, connect.
+     * Returns true if session was restored and connected.
+     */
+    suspend fun restorePersistedSession(): Boolean {
+        val saved = sessionStorage.load() ?: return false
+        val savedToken = saved["token"] as? String ?: return false
+        val savedUserId = saved["userId"] as? String ?: return false
+        if (savedToken.isBlank() || savedUserId.isBlank()) return false
+
+        log("SESSION restoring user=${saved["username"]}")
+        restoreSession(
+            token = savedToken,
+            refreshToken = saved["refreshToken"] as? String,
+            userId = savedUserId,
+            deviceId = saved["deviceId"] as? String,
+            username = saved["username"] as? String,
+            registrationId = (saved["registrationId"] as? Number)?.toInt() ?: 0
+        )
+
+        // Define models from cached schema if available
+        val cachedSchema = saved["cachedSchema"] as? String
+        if (cachedSchema != null) {
+            try {
+                defineModelsFromJson(cachedSchema)
+                log("SESSION models defined from cache")
+            } catch (e: Exception) {
+                log("SESSION cached schema invalid: ${e.message}")
+            }
+        }
+
+        // Refresh token + connect
+        try {
+            val fresh = ensureFreshToken()
+            if (!fresh) {
+                log("SESSION token refresh failed — clearing")
+                sessionStorage.clear()
+                return false
+            }
+            connect()
+            persistSession() // save refreshed tokens
+            log("SESSION restored and connected")
+            return true
+        } catch (e: Exception) {
+            log("SESSION restore connect failed: ${e.message}")
+            return false
+        }
+    }
+
+    // ─── Facade Methods (bridges call these 1:1) ────────────
+
+    /**
+     * Parse ORM schema from JSON (matches schema.ts format) and define models.
+     * JSON shape: {"modelName": {"fields": {"name": "string"}, "sync": "gset", "ttl": "24h", "private": false}}
+     */
+    suspend fun defineModelsFromJson(jsonString: String) {
+        val schema = JSONObject(jsonString)
+        val models = mutableMapOf<String, ModelConfig>()
+        for (name in schema.keys()) {
+            val model = schema.getJSONObject(name)
+            val fieldsObj = model.getJSONObject("fields")
+            val fields = mutableMapOf<String, String>()
+            for (key in fieldsObj.keys()) fields[key] = fieldsObj.getString(key)
+            models[name] = ModelConfig(
+                fields = fields,
+                sync = model.optString("sync", "gset"),
+                ttl = model.optString("ttl", null),
+                private = model.optBoolean("private", false)
+            )
+        }
+        orm.define(models)
+        // Cache schema for cold-start restore
+        val existing = sessionStorage.load()?.toMutableMap() ?: mutableMapOf()
+        existing["cachedSchema"] = jsonString
+        sessionStorage.save(existing)
+        log("MODELS defined + cached: ${models.keys.joinToString()}")
+    }
+
+    /**
+     * Decode a friend code (base64 JSON) and befriend the user.
+     * Code format: Base64({"n":"username","u":"userId"}) — matches iOS FriendCode.swift
+     */
+    suspend fun addFriendByCode(code: String) {
+        val cleaned = code.trim()
+            .replace("\u00AD", "") // strip soft hyphens from iOS copy
+            .replace("\\s".toRegex(), "")
+        val decoded = String(Base64.getDecoder().decode(cleaned))
+        val json = JSONObject(decoded)
+        val friendUserId = json.getString("u")
+        val friendUsername = json.getString("n")
+        log("ADD_FRIEND_BY_CODE $friendUsername ($friendUserId)")
+        befriend(friendUserId, friendUsername)
+    }
+
+    /**
+     * Generate a friend code for sharing. Returns base64-encoded JSON.
+     */
+    fun friendCode(): String {
+        val uid = userId ?: throw IllegalStateException("Not authenticated")
+        val uname = username ?: throw IllegalStateException("Not authenticated")
+        val json = JSONObject().apply { put("n", uname); put("u", uid) }
+        return Base64.getEncoder().encodeToString(json.toString().toByteArray())
+    }
+
+    /**
+     * Full logout — handles ALL teardown in correct order.
+     * Bridges call this single method instead of orchestrating cleanup.
+     */
+    suspend fun fullLogout() {
+        log("FULL_LOGOUT start")
+        envelopeJob?.cancel()
+        eventForwardingJob?.cancel()
+        authManager.tokenRefreshJob?.cancel()
+        gateway.disconnect()
+        _connectionState.value = ConnectionState.DISCONNECTED
+        try { authManager.logout() } catch (_: Exception) {}
+        _authState.value = AuthState.LOGGED_OUT
+        _friendList.value = emptyList()
+        _pendingRequests.value = emptyList()
+        _conversations.value = emptyMap()
+        sessionStorage.clear()
+        log("FULL_LOGOUT complete")
+    }
+
+    /** Start forwarding StateFlows → typedEvents stream for bridge consumption */
+    private var eventForwardingJob: Job? = null
+    private fun startEventForwarding() {
+        eventForwardingJob?.cancel()
+        eventForwardingJob = scope.launch {
+            // Friends
+            launch {
+                friendList.collect { friends ->
+                    _typedEvents.emit(ObscuraEvent.FriendsUpdated(friends))
+                }
+            }
+            // Connection state
+            launch {
+                connectionState.collect { state ->
+                    _typedEvents.emit(ObscuraEvent.ConnectionChanged(state))
+                }
+            }
+            // Auth state
+            launch {
+                authState.collect { state ->
+                    _typedEvents.emit(ObscuraEvent.AuthChanged(state))
+                }
+            }
+        }
+    }
+
+    // ─── Connect / Disconnect ───────────────────────────────
+
     suspend fun connect() {
         log("CONNECT start")
+        ensureFreshToken()
         _connectionState.value = ConnectionState.CONNECTING
         messenger.rebuildDeviceMap(friends.getAccepted())
         gateway.connect()
         _connectionState.value = ConnectionState.CONNECTED
         log("CONNECT ok — websocket open")
         startEnvelopeLoop()
+        startEventForwarding()
         authManager.startTokenRefresh()
         startPreKeyStatusListener()
+        persistSession() // auto-save refreshed tokens
     }
 
     fun disconnect() {
         log("DISCONNECT")
         authManager.tokenRefreshJob?.cancel()
         envelopeJob?.cancel()
+        eventForwardingJob?.cancel()
         gateway.disconnect()
         _connectionState.value = ConnectionState.DISCONNECTED
     }
@@ -646,6 +828,18 @@ class ObscuraClient(
             authorDeviceId = sync.authorDeviceId, signature = sync.signature.toByteArray()
         )
         orm.handleSync(syncData, sourceUserId)
+
+        // Emit typed event for bridges
+        try {
+            val dataMap = mutableMapOf<String, Any?>()
+            val dataJson = org.json.JSONObject(String(sync.data.toByteArray()))
+            for (key in dataJson.keys()) dataMap[key] = if (dataJson.isNull(key)) null else dataJson.get(key)
+            val entry = com.obscura.kit.orm.OrmEntry(
+                id = sync.id, data = dataMap,
+                timestamp = sync.timestamp, authorDeviceId = sync.authorDeviceId
+            )
+            _typedEvents.tryEmit(ObscuraEvent.MessageReceived(sync.model, entry))
+        } catch (_: Exception) {}
 
         // DirectMessage MODEL_SYNC → also route to conversations for chat UI
         if (sync.model == "directMessage") {
