@@ -102,8 +102,28 @@ internal class MessagingManager(
 
     suspend fun downloadAttachment(id: String): ByteArray = api.fetchAttachment(id)
 
+    companion object {
+        private const val MAX_CACHE_BYTES = 50L * 1024 * 1024 // 50MB
+    }
+
     suspend fun downloadDecryptedAttachment(id: String, contentKey: ByteArray, nonce: ByteArray, expectedHash: ByteArray? = null): ByteArray {
+        // Check cache first
+        val cached = ctx.db.attachmentCacheQueries.selectById(id).executeAsOneOrNull()
+        if (cached != null) return cached
+
+        // Cache miss — download, decrypt, cache
         val ciphertext = api.fetchAttachment(id)
-        return com.obscura.kit.crypto.AttachmentCrypto.decrypt(ciphertext, contentKey, nonce, expectedHash)
+        val plaintext = com.obscura.kit.crypto.AttachmentCrypto.decrypt(ciphertext, contentKey, nonce, expectedHash)
+
+        // Store in encrypted DB
+        ctx.db.attachmentCacheQueries.insert(id, plaintext, plaintext.size.toLong(), System.currentTimeMillis())
+
+        // Evict if over size limit
+        val totalSize = ctx.db.attachmentCacheQueries.totalSize().executeAsOne()
+        if (totalSize > MAX_CACHE_BYTES) {
+            ctx.db.attachmentCacheQueries.deleteOldest(10)
+        }
+
+        return plaintext
     }
 }

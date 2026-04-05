@@ -215,7 +215,8 @@ class ObscuraClient(
             messenger = messenger,
             friends = friends,
             devices = devices,
-            messages = messagesDomain
+            messages = messagesDomain,
+            db = db
         )
 
         // Create managers — order matters: AuthManager before MessageSender
@@ -555,6 +556,7 @@ class ObscuraClient(
         _friendList.value = emptyList()
         _pendingRequests.value = emptyList()
         _conversations.value = emptyMap()
+        db.attachmentCacheQueries.deleteAll()
         sessionStorage.clear()
         log("FULL_LOGOUT complete")
     }
